@@ -5,3 +5,6 @@
 
 # Deployment environment
 deploy/server.env
+deploy/*.sql
+*.dump
+medai-deploy.zip

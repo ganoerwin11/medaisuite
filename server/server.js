@@ -352,9 +352,19 @@ function buildClosingTwiml(message) {
 }
 
 function publicBaseUrl(req) {
-  return process.env.TWILIO_WEBHOOK_URL
-    ? new URL(process.env.TWILIO_WEBHOOK_URL).origin
-    : `${req.protocol}://${req.get("host")}`;
+  if (process.env.TWILIO_WEBHOOK_URL) {
+    try {
+      const configured = new URL(process.env.TWILIO_WEBHOOK_URL);
+      if (!["localhost", "127.0.0.1", "::1", "[::1]"].includes(configured.hostname)) {
+        return configured.origin;
+      }
+    } catch {
+      // Fall through to request-derived origin.
+    }
+  }
+  const proto = String(req.get("x-forwarded-proto") || req.protocol).split(",")[0].trim();
+  const host = String(req.get("x-forwarded-host") || req.get("host")).split(",")[0].trim();
+  return `${proto}://${host}`;
 }
 
 app.get("/api/health", async (_req, res) => {
