@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.NODE_ENV = "test";
-const { app, cloneIntakeState } = await import("./server.js");
+const { app, cloneIntakeState, normalizeSdpOffer } = await import("./server.js");
 
 const DEMO_ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@clinic.local";
 const DEMO_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "ChangeMe123!";
@@ -159,6 +159,13 @@ test("intake state changes use a detached copy before saving", () => {
   assert.equal(previous.consent, null);
   assert.deepEqual(previous.answers, {});
   assert.deepEqual(previous.skipped, []);
+});
+
+test("SDP offers are normalized to CRLF and retain a final line ending", () => {
+  const offer = normalizeSdpOffer("v=0\no=- offer\nm=audio 9 UDP/TLS/RTP/SAVPF 111");
+  assert.equal(offer, "v=0\r\no=- offer\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n");
+  assert.equal(normalizeSdpOffer("  \r\n "), "");
+  assert.equal(normalizeSdpOffer(null), "");
 });
 
 test("receptionist question configuration endpoint returns and accepts the configured prompts", async () => {

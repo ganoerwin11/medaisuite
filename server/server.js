@@ -350,6 +350,12 @@ function cloneIntakeState(state) {
   };
 }
 
+function normalizeSdpOffer(value) {
+  if (typeof value !== "string") return "";
+  const lines = value.replace(/\r\n?/g, "\n").trim().split("\n");
+  return lines.length === 1 && !lines[0] ? "" : `${lines.join("\r\n")}\r\n`;
+}
+
 function dbConditionMet(condition, answers) {
   if (!condition) return true;
   if (condition.anyOf) return condition.anyOf.some((item) => dbConditionMet(item, answers));
@@ -985,7 +991,7 @@ app.post("/api/public/widgets/:widgetId/voice/session", async (req, res) => {
   const voiceSession = await findPublicSession(req);
   if (!voiceSession) return res.status(401).json({ message: "A valid widget session is required." });
   if (!openaiClient) return res.status(503).json({ message: "OpenAI is not configured on the server." });
-  const sdp = String(req.body?.sdp || "").trim();
+  const sdp = normalizeSdpOffer(req.body?.sdp);
   if (
     !sdp ||
     sdp.length > 100_000 ||
@@ -2151,7 +2157,7 @@ if (IS_PRODUCTION) {
   });
 }
 
-export { app, cloneIntakeState };
+export { app, cloneIntakeState, normalizeSdpOffer };
 
 if (process.env.NODE_ENV !== "test") {
   await initializeDatabase();
