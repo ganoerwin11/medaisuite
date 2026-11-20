@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.NODE_ENV = "test";
-const { app, cloneIntakeState, normalizeSdpOffer } = await import("./server.js");
+const { app, buildRealtimeVoiceSession, cloneIntakeState, normalizeSdpOffer } =
+  await import("./server.js");
 
 const DEMO_ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@clinic.local";
 const DEMO_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "ChangeMe123!";
@@ -166,6 +167,19 @@ test("SDP offers are normalized to CRLF and retain a final line ending", () => {
   assert.equal(offer, "v=0\r\no=- offer\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n");
   assert.equal(normalizeSdpOffer("  \r\n "), "");
   assert.equal(normalizeSdpOffer(null), "");
+});
+
+test("realtime voice sessions use the configured model and voice", () => {
+  const session = buildRealtimeVoiceSession(
+    { voice: "coral" },
+    { OPENAI_REALTIME_MODEL: "gpt-realtime-mini", OPENAI_VOICE: "alloy" },
+  );
+
+  assert.equal(session.type, "realtime");
+  assert.equal(session.model, "gpt-realtime-mini");
+  assert.equal(session.audio.output.voice, "coral");
+  assert.equal(session.audio.input.turn_detection.create_response, false);
+  assert.deepEqual(session.output_modalities, ["audio"]);
 });
 
 test("receptionist question configuration endpoint returns and accepts the configured prompts", async () => {

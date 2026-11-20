@@ -65,6 +65,27 @@ const openaiClient = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
 
+function buildRealtimeVoiceSession(configuration, env = process.env) {
+  return {
+    type: "realtime",
+    model: env.OPENAI_REALTIME_MODEL || "gpt-realtime",
+    instructions:
+      "Do not respond automatically. The application transcribes each user turn, handles intake consent and saves answers, then sends the exact reply for you to speak. When asked to respond, speak only the supplied text without adding or changing anything.",
+    audio: {
+      input: {
+        transcription: { model: "gpt-4o-mini-transcribe" },
+        turn_detection: {
+          type: "server_vad",
+          create_response: false,
+          interrupt_response: false,
+        },
+      },
+      output: { voice: configuration?.voice || env.OPENAI_VOICE || "alloy" },
+    },
+    output_modalities: ["audio"],
+  };
+}
+
 function toE164(value) {
   if (!value) return value;
   const trimmed = String(value).trim();
@@ -1006,24 +1027,8 @@ app.post("/api/public/widgets/:widgetId/voice/session", async (req, res) => {
       include: [{ model: AssistantConfiguration, as: "configuration" }],
     });
     const configuration = assistant?.configuration;
-    const session = {
-      type: "realtime",
-      model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
-      instructions: "Do not respond automatically. The application transcribes each user turn, handles intake consent and saves answers, then sends the exact reply for you to speak. When asked to respond, speak only the supplied text without adding or changing anything.",
-      audio: {
-        input: {
-          transcription: { model: "gpt-4o-mini-transcribe" },
-          turn_detection: {
-            type: "server_vad",
-            create_response: false,
-            interrupt_response: false,
-          },
-        },
-        output: { voice: configuration?.voice || process.env.OPENAI_VOICE || "alloy" },
-      },
-      output_modalities: ["audio"],
-    };
-    const response = await openaiClient.realtime.calls.create({ sdp });
+    const session = buildRealtimeVoiceSession(configuration);
+    const response = await openaiClient.realtime.calls.create({ sdp, session });
     const answerSdp = await response.text();
     if (!answerSdp.trim().startsWith("v=0")) {
       throw new Error("OpenAI returned an invalid SDP answer.");
@@ -2157,7 +2162,12 @@ if (IS_PRODUCTION) {
   });
 }
 
-export { app, cloneIntakeState, normalizeSdpOffer };
+export {
+  app,
+  buildRealtimeVoiceSession,
+  cloneIntakeState,
+  normalizeSdpOffer,
+};
 
 if (process.env.NODE_ENV !== "test") {
   await initializeDatabase();
