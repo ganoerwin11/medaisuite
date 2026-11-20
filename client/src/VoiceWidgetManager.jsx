@@ -13,20 +13,34 @@ export function VoiceWidgetManager({ onToast }) {
   const [embed, setEmbed] = useState("");
   const [intakeEnabled, setIntakeEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
   async function load() {
     setLoading(true);
-    const [assistantResponse, widgetResponse] = await Promise.all([
-      apiFetch("/api/assistants"),
-      apiFetch("/api/widgets"),
-    ]);
-    if (assistantResponse.status === 503) {
+    setLoadError("");
+    try {
+      const [assistantResponse, widgetResponse] = await Promise.all([
+        apiFetch("/api/assistants"),
+        apiFetch("/api/widgets"),
+      ]);
+      const failedResponse = [assistantResponse, widgetResponse].find(
+        (response) => !response.ok,
+      );
+      if (failedResponse) {
+        const body = await failedResponse.json().catch(() => ({}));
+        if (failedResponse.status === 503) {
+          throw new Error("PostgreSQL is not connected. Check the server database configuration.");
+        }
+        throw new Error(body.message || "Could not load assistants and widgets.");
+      }
+
+      setAssistants(await assistantResponse.json());
+      setWidgets(await widgetResponse.json());
+    } catch (error) {
+      setLoadError(error.message || "Could not load assistants and widgets.");
+    } finally {
       setLoading(false);
-      return;
     }
-    if (assistantResponse.ok) setAssistants(await assistantResponse.json());
-    if (widgetResponse.ok) setWidgets(await widgetResponse.json());
-    setLoading(false);
   }
 
   useEffect(() => { load(); }, []);
@@ -88,18 +102,15 @@ export function VoiceWidgetManager({ onToast }) {
   }
 
   if (loading) return <section className="content-card"><div className="card-title">Loading AI assistants...</div></section>;
-  if (!loading && assistants.length === 0 && widgets.length === 0) {
-    return (
-      <section className="content-card">
-        <div className="card-title">AI Voice & Widget</div>
-        <p>Connect PostgreSQL to create persistent assistants and embeddable widgets.</p>
-      </section>
-    );
-  }
 
   return (
     <section className="content-card">
       <div className="card-title">AI Assistants & Widgets</div>
+      {loadError && (
+        <div role="alert" style={{ margin: "12px 0", color: "#b42318" }}>
+          {loadError} <button type="button" onClick={load}>Retry</button>
+        </div>
+      )}
       <form className="question-form" onSubmit={createAssistant}>
         <input value={assistantName} onChange={(event) => setAssistantName(event.target.value)} placeholder="Assistant name" required />
         <textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="System instructions" rows={4} />
@@ -119,7 +130,10 @@ export function VoiceWidgetManager({ onToast }) {
               <td>{assistant.configuration?.model || "gpt-4o-mini"}</td>
               <td>{assistant.active ? "Active" : "Inactive"}</td>
             </tr>
-          ))}</tbody>
+          ))}
+          {assistants.length === 0 && (
+            <tr><td className="empty-state" colSpan={3}>No assistants yet. Create one above to get started.</td></tr>
+          )}</tbody>
         </table>
       </div>
 
@@ -146,7 +160,10 @@ export function VoiceWidgetManager({ onToast }) {
                 <button type="button" onClick={() => toggleWidget(widget)}>{widget.active ? "Disable" : "Enable"}</button>
               </td>
             </tr>
-          ))}</tbody>
+          ))}
+          {widgets.length === 0 && (
+            <tr><td className="empty-state" colSpan={4}>No widgets yet. Create one after creating an assistant.</td></tr>
+          )}</tbody>
         </table>
       </div>
       {embed && <textarea readOnly value={embed} rows={6} style={{ width: "100%", marginTop: 16 }} />}
