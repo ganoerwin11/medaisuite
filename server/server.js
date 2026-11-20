@@ -986,7 +986,13 @@ app.post("/api/public/widgets/:widgetId/voice/session", async (req, res) => {
   if (!voiceSession) return res.status(401).json({ message: "A valid widget session is required." });
   if (!openaiClient) return res.status(503).json({ message: "OpenAI is not configured on the server." });
   const sdp = String(req.body?.sdp || "").trim();
-  if (!sdp || sdp.length > 100_000) {
+  if (
+    !sdp ||
+    sdp.length > 100_000 ||
+    !/^v=0(?:\r?\n)/.test(sdp) ||
+    !/^m=audio\s/m.test(sdp) ||
+    !/^m=application\s/m.test(sdp)
+  ) {
     return res.status(400).json({ message: "A valid WebRTC offer is required." });
   }
   try {
@@ -994,35 +1000,37 @@ app.post("/api/public/widgets/:widgetId/voice/session", async (req, res) => {
       include: [{ model: AssistantConfiguration, as: "configuration" }],
     });
     const configuration = assistant?.configuration;
-    const response = await openaiClient.realtime.calls.create({
-      sdp,
-      session: {
-        type: "realtime",
-        model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
-        instructions: "Do not respond automatically. The application transcribes each user turn, handles intake consent and saves answers, then sends the exact reply for you to speak. When asked to respond, speak only the supplied text without adding or changing anything.",
-        audio: {
-          input: {
-            transcription: { model: "gpt-4o-mini-transcribe" },
-            turn_detection: {
-              type: "server_vad",
-              create_response: false,
-              interrupt_response: false,
-            },
+    const session = {
+      type: "realtime",
+      model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
+      instructions: "Do not respond automatically. The application transcribes each user turn, handles intake consent and saves answers, then sends the exact reply for you to speak. When asked to respond, speak only the supplied text without adding or changing anything.",
+      audio: {
+        input: {
+          transcription: { model: "gpt-4o-mini-transcribe" },
+          turn_detection: {
+            type: "server_vad",
+            create_response: false,
+            interrupt_response: false,
           },
-          output: { voice: configuration?.voice || process.env.OPENAI_VOICE || "alloy" },
         },
-        output_modalities: ["audio"],
+        output: { voice: configuration?.voice || process.env.OPENAI_VOICE || "alloy" },
       },
-    });
+      output_modalities: ["audio"],
+    };
+    const response = await openaiClient.realtime.calls.create({ sdp });
     const answerSdp = await response.text();
+    if (!answerSdp.trim().startsWith("v=0")) {
+      throw new Error("OpenAI returned an invalid SDP answer.");
+    }
     await voiceSession.update({
+      providerSessionId: null,
       expiresAt: new Date(Date.now() + 30 * 60 * 1000),
       endedAt: null,
     });
     await UsageLog.create({ assistantId: widget.assistantId, widgetId: widget.id, eventType: "voice_session" });
     res.set("Access-Control-Allow-Origin", origin);
     res.set("Cache-Control", "no-store");
-    res.status(201).json({ sdp: answerSdp, expiresAt: voiceSession.expiresAt });
+    res.status(201).json({ sdp: answerSdp, session, expiresAt: voiceSession.expiresAt });
   } catch (error) {
     await ApiLog.create({ provider: "openai", endpoint: "realtime.calls.create", statusCode: 502, latencyMs: 0, error: error.message });
     res.status(502).json({ message: "Could not initialize voice chat." });

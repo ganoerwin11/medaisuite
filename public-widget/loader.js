@@ -90,6 +90,9 @@
       var voiceCancelled = false;
       var voiceSessionReady = false;
       var voiceGreetingSent = false;
+      var voiceSessionCreated = false;
+      var voiceSessionUpdateSent = false;
+      var voiceSessionConfig = null;
       var sending = false;
       var processingVoiceTranscript = false;
       var voiceTranscriptQueue = [];
@@ -233,6 +236,18 @@
         speakVoiceReply(lastAssistantReply);
       }
 
+      function configureVoiceSession() {
+        if (
+          voiceSessionUpdateSent ||
+          !voiceSessionCreated ||
+          !voiceSessionConfig ||
+          !voiceEvents ||
+          voiceEvents.readyState !== "open"
+        ) return;
+        voiceSessionUpdateSent = true;
+        voiceEvents.send(JSON.stringify({ type: "session.update", session: voiceSessionConfig }));
+      }
+
       if (voiceButton) {
         voiceButton.addEventListener("click", function () {
           if (voiceStarting) return;
@@ -249,6 +264,11 @@
         voiceCancelled = false;
         voiceSessionReady = false;
         voiceGreetingSent = false;
+        voiceSessionCreated = false;
+        voiceSessionUpdateSent = false;
+        voiceSessionConfig = null;
+        processedVoiceItems = Object.create(null);
+        voiceTranscriptQueue = [];
         voiceButton.disabled = true;
         voiceButton.textContent = "Connecting...";
         setTextDisabled(true);
@@ -288,7 +308,7 @@
                 voiceButton.textContent = "End voice chat";
                 voiceButton.setAttribute("aria-pressed", "true");
                 setTextDisabled(true);
-                setStatus("Voice chat is connected. Speak naturally, or end the call when finished.");
+                setStatus("Finishing voice setup...");
                 processVoiceTranscriptQueue();
               } else if (voicePeer && voicePeer.connectionState === "failed") {
                 failVoice("Voice connection failed. Check your connection and try again.");
@@ -297,6 +317,7 @@
 
             voiceEvents = voicePeer.createDataChannel("oai-events");
             voiceEvents.addEventListener("open", function () {
+              configureVoiceSession();
               speakInitialVoiceReply();
             });
             voiceEvents.addEventListener("message", function (event) {
@@ -308,8 +329,18 @@
                 return;
               }
               if (message.type === "session.created") {
+                voiceSessionCreated = true;
+                configureVoiceSession();
+              } else if (message.type === "session.updated") {
                 voiceSessionReady = true;
+                if (microphoneStream) {
+                  microphoneStream.getAudioTracks().forEach(function (track) {
+                    track.enabled = true;
+                  });
+                }
+                setStatus("Voice chat is connected. Speak naturally, or end the call when finished.");
                 speakInitialVoiceReply();
+                processVoiceTranscriptQueue();
               }
               if (message.type === "error") {
                 failVoice(message.error && message.error.message || "Voice chat encountered an error.");
@@ -323,6 +354,7 @@
               }
             });
             microphoneStream.getAudioTracks().forEach(function (track) {
+              track.enabled = false;
               voicePeer.addTrack(track, microphoneStream);
             });
 
@@ -341,6 +373,11 @@
             }
             if (voiceCancelled) throw new Error("Voice chat was cancelled.");
             if (!result.body.sdp) throw new Error("The voice service returned an invalid answer.");
+            if (!result.body.session || result.body.session.type !== "realtime") {
+              throw new Error("The voice service returned invalid session settings.");
+            }
+            voiceSessionConfig = result.body.session;
+            configureVoiceSession();
             await voicePeer.setRemoteDescription({ type: "answer", sdp: result.body.sdp });
           } catch (error) {
             releaseVoiceResources();
