@@ -59,7 +59,7 @@
         '<header class="ai-header" style="background:' + config.primaryColor + '"><strong>' + escapeHtml(config.title) + '</strong><button class="ai-close" type="button" aria-label="Close chat">×</button></header>' +
         '<div class="ai-messages" role="log" aria-live="polite"><div class="ai-message assistant">' + escapeHtml(config.welcomeMessage || "How can I help?") + "</div></div>" +
         '<p class="ai-status" role="status" aria-live="polite"></p>' +
-        (config.voiceEnabled ? '<p class="ai-voice-note">Voice chat is for general questions. Use text chat for patient intake.</p>' : "") +
+        (config.voiceEnabled ? '<p class="ai-voice-note">Voice chat can also be used for intake. Details are saved only after you consent and confirm.</p>' : "") +
         (config.textEnabled
           ? '<form class="ai-form"><input aria-label="Message" maxlength="4000" placeholder="Type a message..." required><button type="submit" style="background:' + config.primaryColor + '">Send</button></form>'
           : "") +
@@ -82,12 +82,19 @@
       var sessionToken = "";
       var sessionPromise = null;
       var voicePeer = null;
+      var voiceEvents = null;
       var microphoneStream = null;
       var voiceSessionToken = "";
       var voiceStarting = false;
       var voiceActive = false;
       var voiceCancelled = false;
+      var voiceSessionReady = false;
+      var voiceGreetingSent = false;
       var sending = false;
+      var processingVoiceTranscript = false;
+      var voiceTranscriptQueue = [];
+      var processedVoiceItems = Object.create(null);
+      var lastAssistantReply = config.welcomeMessage || "How can I help you today?";
 
       function setStatus(message, isError) {
         status.textContent = message || "";
@@ -125,7 +132,10 @@
               throw new Error(result.body.message || "Could not start chat.");
             }
             sessionToken = result.body.sessionToken;
-            if (result.body.firstPrompt) appendMessage(messages, "assistant", result.body.firstPrompt);
+            if (result.body.firstPrompt) {
+              lastAssistantReply = result.body.firstPrompt;
+              appendMessage(messages, "assistant", lastAssistantReply);
+            }
             return sessionToken;
           })
           .catch(function (error) {
@@ -142,12 +152,22 @@
           var text = input.value.trim();
           if (!text) return;
 
-          sending = true;
-          setTextDisabled(true);
-          setStatus("Sending message...");
-          appendMessage(messages, "user", text);
+          submitMessage(text, false)
+            .then(function () {
+              input.value = "";
+            })
+            .catch(function () {});
+        });
+      }
 
-          ensureSession()
+      function submitMessage(text, fromVoice) {
+        if (sending) return Promise.reject(new Error("A message is already being processed."));
+        sending = true;
+        setTextDisabled(true);
+        setStatus(fromVoice ? "Processing what you said..." : "Sending message...");
+        appendMessage(messages, "user", text);
+
+        return ensureSession()
             .then(function (token) {
               return fetch(baseUrl + "/api/public/widgets/" + encodeURIComponent(widgetId) + "/messages", {
                 method: "POST",
@@ -160,18 +180,57 @@
               if (!result.response.ok) {
                 throw new Error(result.body.message || "Could not send message.");
               }
-              input.value = "";
-              appendMessage(messages, "assistant", result.body.message || "I couldn't generate a reply. Please try again.");
+              lastAssistantReply = result.body.message || "I couldn't generate a reply. Please try again.";
+              appendMessage(messages, "assistant", lastAssistantReply);
               setStatus("");
+              return lastAssistantReply;
             })
             .catch(function (error) {
               setStatus(error.message || "Could not send message. Please try again.", true);
+              throw error;
             })
             .finally(function () {
               sending = false;
               setTextDisabled(voiceStarting || voiceActive);
             });
-        });
+      }
+
+      function queueVoiceTranscript(transcript) {
+        var text = String(transcript || "").trim();
+        if (!text || text.length > 4000) return;
+        voiceTranscriptQueue.push(text);
+        processVoiceTranscriptQueue();
+      }
+
+      function processVoiceTranscriptQueue() {
+        if (processingVoiceTranscript || sending || !voiceActive || !voiceTranscriptQueue.length) return;
+        processingVoiceTranscript = true;
+        var transcript = voiceTranscriptQueue.shift();
+        submitMessage(transcript, true)
+            .then(speakVoiceReply)
+            .catch(function () {})
+            .finally(function () {
+              processingVoiceTranscript = false;
+              processVoiceTranscriptQueue();
+            });
+      }
+
+      function speakVoiceReply(text) {
+        if (!voiceEvents || voiceEvents.readyState !== "open" || !voiceSessionReady || !text) return;
+        voiceEvents.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              instructions: "Read this exact text aloud. Do not add, remove, or change any words: " + JSON.stringify(text),
+              output_modalities: ["audio"],
+              max_output_tokens: 512,
+            },
+        }));
+      }
+
+      function speakInitialVoiceReply() {
+        if (voiceGreetingSent || voiceCancelled || !voiceSessionReady || !voiceEvents || voiceEvents.readyState !== "open") return;
+        voiceGreetingSent = true;
+        speakVoiceReply(lastAssistantReply);
       }
 
       if (voiceButton) {
@@ -188,6 +247,8 @@
       function startVoice() {
         voiceStarting = true;
         voiceCancelled = false;
+        voiceSessionReady = false;
+        voiceGreetingSent = false;
         voiceButton.disabled = true;
         voiceButton.textContent = "Connecting...";
         setTextDisabled(true);
@@ -202,7 +263,9 @@
             if (!window.RTCPeerConnection) {
               throw new Error("Voice chat is not supported in this browser.");
             }
-            microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            microphoneStream = await navigator.mediaDevices.getUserMedia({
+              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            });
             if (voiceCancelled) throw new Error("Voice chat was cancelled.");
 
             token = await ensureSession();
@@ -226,13 +289,17 @@
                 voiceButton.setAttribute("aria-pressed", "true");
                 setTextDisabled(true);
                 setStatus("Voice chat is connected. Speak naturally, or end the call when finished.");
+                processVoiceTranscriptQueue();
               } else if (voicePeer && voicePeer.connectionState === "failed") {
                 failVoice("Voice connection failed. Check your connection and try again.");
               }
             });
 
-            var events = voicePeer.createDataChannel("oai-events");
-            events.addEventListener("message", function (event) {
+            voiceEvents = voicePeer.createDataChannel("oai-events");
+            voiceEvents.addEventListener("open", function () {
+              speakInitialVoiceReply();
+            });
+            voiceEvents.addEventListener("message", function (event) {
               var message;
               try {
                 message = JSON.parse(event.data);
@@ -240,8 +307,19 @@
                 setStatus("Received an invalid voice session event.", true);
                 return;
               }
+              if (message.type === "session.created") {
+                voiceSessionReady = true;
+                speakInitialVoiceReply();
+              }
               if (message.type === "error") {
                 failVoice(message.error && message.error.message || "Voice chat encountered an error.");
+              } else if (message.type === "conversation.item.input_audio_transcription.completed") {
+                if (message.item_id && processedVoiceItems[message.item_id]) return;
+                if (message.item_id) processedVoiceItems[message.item_id] = true;
+                if (message.transcript) queueVoiceTranscript(message.transcript);
+              } else if (message.type === "conversation.item.input_audio_transcription.failed") {
+                setStatus("I couldn't understand that. Please try saying it again.", true);
+                speakVoiceReply("I couldn't understand that. Please try saying it again.");
               }
             });
             microphoneStream.getAudioTracks().forEach(function (track) {
@@ -289,6 +367,7 @@
       function failVoice(message) {
         voiceCancelled = true;
         var token = voiceSessionToken;
+        voiceTranscriptQueue = [];
         releaseVoiceResources();
         voiceSessionToken = "";
         voiceStarting = false;
@@ -308,6 +387,7 @@
       function stopVoice() {
         voiceCancelled = true;
         var token = voiceSessionToken;
+        voiceTranscriptQueue = [];
         releaseVoiceResources();
         voiceSessionToken = "";
         voiceStarting = false;
@@ -330,6 +410,10 @@
       }
 
       function releaseVoiceResources() {
+        if (voiceEvents) {
+          voiceEvents.close();
+          voiceEvents = null;
+        }
         if (voicePeer) {
           voicePeer.close();
           voicePeer = null;

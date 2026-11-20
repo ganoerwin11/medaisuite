@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.NODE_ENV = "test";
-const { app } = await import("./server.js");
+const { app, cloneIntakeState } = await import("./server.js");
 
 const DEMO_ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@clinic.local";
 const DEMO_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "ChangeMe123!";
@@ -139,6 +139,26 @@ test("intake submission requires consent and a call reason", async () => {
       assert.equal(response.status, 400);
     }
   });
+});
+
+test("intake state changes use a detached copy before saving", () => {
+  const previous = {
+    active: true,
+    consent: null,
+    answers: {},
+    skipped: [],
+    pendingCode: "consent",
+    completed: false,
+    retries: 0,
+  };
+  const next = cloneIntakeState(previous);
+  next.consent = true;
+  next.answers.A02 = { text: "Erwin Gano", value: null };
+  next.skipped.push("A01");
+
+  assert.equal(previous.consent, null);
+  assert.deepEqual(previous.answers, {});
+  assert.deepEqual(previous.skipped, []);
 });
 
 test("receptionist question configuration endpoint returns and accepts the configured prompts", async () => {

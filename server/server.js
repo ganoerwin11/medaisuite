@@ -342,6 +342,14 @@ function createIntakeState(intakeEnabled) {
     : { active: false };
 }
 
+function cloneIntakeState(state) {
+  return {
+    ...state,
+    answers: { ...(state.answers || {}) },
+    skipped: [...(state.skipped || [])],
+  };
+}
+
 function dbConditionMet(condition, answers) {
   if (!condition) return true;
   if (condition.anyOf) return condition.anyOf.some((item) => dbConditionMet(item, answers));
@@ -796,7 +804,7 @@ app.post("/api/public/widgets/:widgetId/messages", async (req, res) => {
   }
 
   if (conversation.intakeState?.active) {
-    const state = conversation.intakeState;
+    const state = cloneIntakeState(conversation.intakeState);
     let reply;
 
     if (state.pendingCode === "consent") {
@@ -986,34 +994,37 @@ app.post("/api/public/widgets/:widgetId/voice/session", async (req, res) => {
       include: [{ model: AssistantConfiguration, as: "configuration" }],
     });
     const configuration = assistant?.configuration;
-    const instructions = [
-      configuration?.instructions || "You are a helpful clinic assistant. Be warm, brief, and clear.",
-      configuration?.knowledgeBase ? `Knowledge base:\n${configuration.knowledgeBase}` : "",
-      "Voice chat is for general clinic information only. Do not collect sensitive personal or health information, diagnose conditions, or recommend treatment. Direct patient-specific requests to clinic staff or the clinic's secure intake channel. For emergencies, advise contacting local emergency services.",
-    ].filter(Boolean).join("\n\n");
-    const liveSession = await openaiClient.live.create({
+    const response = await openaiClient.realtime.calls.create({
+      sdp,
       session: {
-        model: "gpt-live-1",
-        instructions,
+        type: "realtime",
+        model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
+        instructions: "Do not respond automatically. The application transcribes each user turn, handles intake consent and saves answers, then sends the exact reply for you to speak. When asked to respond, speak only the supplied text without adding or changing anything.",
         audio: {
-          output: {
-            voice: configuration?.voice || process.env.OPENAI_VOICE || "alloy",
+          input: {
+            transcription: { model: "gpt-4o-mini-transcribe" },
+            turn_detection: {
+              type: "server_vad",
+              create_response: false,
+              interrupt_response: false,
+            },
           },
+          output: { voice: configuration?.voice || process.env.OPENAI_VOICE || "alloy" },
         },
+        output_modalities: ["audio"],
       },
-      transport: { type: "webrtc", sdp },
     });
+    const answerSdp = await response.text();
     await voiceSession.update({
-      providerSessionId: liveSession.session.id,
       expiresAt: new Date(Date.now() + 30 * 60 * 1000),
       endedAt: null,
     });
     await UsageLog.create({ assistantId: widget.assistantId, widgetId: widget.id, eventType: "voice_session" });
     res.set("Access-Control-Allow-Origin", origin);
     res.set("Cache-Control", "no-store");
-    res.status(201).json({ sdp: liveSession.transport.sdp, expiresAt: voiceSession.expiresAt });
+    res.status(201).json({ sdp: answerSdp, expiresAt: voiceSession.expiresAt });
   } catch (error) {
-    await ApiLog.create({ provider: "openai", endpoint: "live.create", statusCode: 502, latencyMs: 0, error: error.message });
+    await ApiLog.create({ provider: "openai", endpoint: "realtime.calls.create", statusCode: 502, latencyMs: 0, error: error.message });
     res.status(502).json({ message: "Could not initialize voice chat." });
   }
 });
@@ -2132,7 +2143,7 @@ if (IS_PRODUCTION) {
   });
 }
 
-export { app };
+export { app, cloneIntakeState };
 
 if (process.env.NODE_ENV !== "test") {
   await initializeDatabase();
