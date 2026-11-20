@@ -15,15 +15,27 @@
 
   var shadow = host.attachShadow({ mode: "closed" });
   var style = document.createElement("style");
-  style.textContent =
-    ":host{all:initial}.ai-widget{position:fixed;z-index:2147483000;font-family:Arial,sans-serif}" +
-    ".ai-widget.bottom-left{left:20px;bottom:20px}.ai-widget.bottom-right{right:20px;bottom:20px}" +
-    ".ai-button{width:56px;height:56px;border:0;border-radius:50%;color:#fff;box-shadow:0 8px 28px #0003;cursor:pointer}" +
-    ".ai-panel{display:flex;flex-direction:column;width:360px;height:520px;max-height:calc(100vh - 100px);background:#fff;border:1px solid #dfe3ea;border-radius:16px;overflow:hidden;box-shadow:0 18px 50px #0003}" +
-    ".ai-header{padding:14px 16px;color:#fff;display:flex;justify-content:space-between;align-items:center}.ai-header button{border:0;background:transparent;color:inherit;cursor:pointer;font-size:18px}" +
-    ".ai-messages{flex:1;overflow:auto;padding:14px}.ai-message{max-width:78%;margin:8px 0;padding:9px 11px;border-radius:12px;font-size:14px;line-height:1.35}" +
-    ".ai-message.user{margin-left:auto;background:#eef2ff}.ai-message.assistant{background:#f3f4f6}.ai-form{display:flex;gap:8px;padding:10px;border-top:1px solid #e5e7eb}.ai-form input{flex:1;min-width:0;border:1px solid #d1d5db;border-radius:10px;padding:10px}.ai-form button{border:0;border-radius:10px;color:#fff;padding:0 13px}" +
-    "@media(max-width:480px){.ai-panel{position:fixed;inset:0;width:100vw;height:100vh;max-height:none;border-radius:0}.ai-widget.bottom-left,.ai-widget.bottom-right{left:0;right:0;bottom:0}}";
+  style.textContent = [
+    ":host{all:initial}.ai-widget,.ai-widget *{box-sizing:border-box;font-family:Arial,sans-serif}",
+    ".ai-widget{position:fixed;z-index:2147483000;color:#1f2937;font-size:14px}",
+    ".ai-widget.bottom-left{left:20px;bottom:20px}.ai-widget.bottom-right{right:20px;bottom:20px}",
+    ".ai-button{width:56px;height:56px;border:0;border-radius:50%;color:#fff;font-size:16px;font-weight:700;box-shadow:0 8px 28px #0003;cursor:pointer}",
+    ".ai-panel{display:flex;flex-direction:column;width:360px;height:520px;max-height:calc(100vh - 100px);background:#fff;border:1px solid #dfe3ea;border-radius:16px;overflow:hidden;box-shadow:0 18px 50px #0003}",
+    ".ai-header{min-height:54px;padding:12px 15px;color:#fff;display:flex;justify-content:space-between;align-items:center;gap:12px}",
+    ".ai-header strong{font-size:15px;line-height:1.3}.ai-header button{width:30px;height:30px;border:0;border-radius:8px;background:#ffffff20;color:inherit;cursor:pointer;font-size:20px}",
+    ".ai-messages{flex:1;overflow:auto;padding:14px;background:#f8f9fc}",
+    ".ai-message{max-width:84%;margin:8px 0;padding:10px 12px;border-radius:13px;font-size:13px;line-height:1.45;overflow-wrap:anywhere;white-space:pre-wrap}",
+    ".ai-message.user{margin-left:auto;background:#ecebff;color:#37336b}.ai-message.assistant{background:#fff;border:1px solid #e8ebf2;color:#3f4a5e;box-shadow:0 2px 6px #1f29370a}",
+    ".ai-status{min-height:18px;margin:0;padding:3px 12px;color:#667085;background:#f8f9fc;font-size:11px;line-height:1.4}",
+    ".ai-status.error{color:#b42318}.ai-voice-note{margin:0;padding:0 12px 8px;color:#7a8495;background:#f8f9fc;font-size:10px}",
+    ".ai-form{display:flex;gap:8px;padding:10px;border-top:1px solid #e5e7eb;background:#fff}",
+    ".ai-form input{flex:1;min-width:0;height:40px;border:1px solid #d1d5db;border-radius:10px;padding:0 11px;font-size:13px;outline:none}",
+    ".ai-form input:focus{border-color:#8b7cf6;box-shadow:0 0 0 3px #8b7cf622}.ai-form button,.ai-voice{min-height:38px;border:0;border-radius:10px;color:#fff;padding:0 13px;font-size:12px;font-weight:700;cursor:pointer}",
+    ".ai-form button:disabled,.ai-voice:disabled{opacity:.55;cursor:wait}.ai-voice-row{display:flex;align-items:center;gap:8px;padding:0 10px 10px;background:#fff}",
+    ".ai-voice{background:#344054}.ai-voice[aria-pressed=true]{background:#b42318}.ai-voice-note{line-height:1.4}",
+    ".ai-audio{display:none}.ai-widget [hidden]{display:none!important}",
+    "@media(max-width:480px){.ai-panel{position:fixed;inset:0;width:100vw;height:100dvh;max-height:none;border:0;border-radius:0}.ai-widget.bottom-left,.ai-widget.bottom-right{left:0;right:0;bottom:0}}",
+  ].join("");
   shadow.appendChild(style);
 
   var root = document.createElement("div");
@@ -32,97 +44,368 @@
   fetch(baseUrl + "/api/public/widgets/" + encodeURIComponent(widgetId), {
     headers: { Accept: "application/json" },
   })
-    .then(function (response) {
-      if (!response.ok) throw new Error("Widget unavailable");
-      return response.json();
-    })
-    .then(function (config) {
+    .then(readResponse)
+    .then(function (result) {
+      if (!result.response.ok) {
+        throw new Error(result.body.message || "Widget unavailable.");
+      }
+
+      var config = result.body;
       var position = config.position === "bottom-left" ? "bottom-left" : "bottom-right";
       root.innerHTML =
         '<div class="ai-widget ' + position + '">' +
-        '<button class="ai-button" aria-label="Open chat" style="background:' + config.buttonColor + '">AI</button>' +
-        '<section class="ai-panel" aria-label="' + escapeHtml(config.title) + '" ' + (config.initialOpen ? "" : 'hidden') + '>' +
-        '<header class="ai-header" style="background:' + config.primaryColor + '"><strong>' + escapeHtml(config.title) + '</strong><button class="ai-close" aria-label="Close chat">×</button></header>' +
-        '<div class="ai-messages"><div class="ai-message assistant">' + escapeHtml(config.welcomeMessage || "How can I help?") + '</div></div>' +
-        '<form class="ai-form"><input aria-label="Message" placeholder="Type a message..." ' + (config.textEnabled ? "" : "disabled") + '><button type="submit" style="background:' + config.primaryColor + '">Send</button></form>' +
+        '<button class="ai-button" aria-label="Open chat" style="background:' + config.buttonColor + '">Chat</button>' +
+        '<section class="ai-panel" aria-label="' + escapeHtml(config.title) + '" ' + (config.initialOpen ? "" : "hidden") + '>' +
+        '<header class="ai-header" style="background:' + config.primaryColor + '"><strong>' + escapeHtml(config.title) + '</strong><button class="ai-close" type="button" aria-label="Close chat">×</button></header>' +
+        '<div class="ai-messages" role="log" aria-live="polite"><div class="ai-message assistant">' + escapeHtml(config.welcomeMessage || "How can I help?") + "</div></div>" +
+        '<p class="ai-status" role="status" aria-live="polite"></p>' +
+        (config.voiceEnabled ? '<p class="ai-voice-note">Voice chat is for general questions. Use text chat for patient intake.</p>' : "") +
+        (config.textEnabled
+          ? '<form class="ai-form"><input aria-label="Message" maxlength="4000" placeholder="Type a message..." required><button type="submit" style="background:' + config.primaryColor + '">Send</button></form>'
+          : "") +
+        (config.voiceEnabled
+          ? '<div class="ai-voice-row"><button class="ai-voice" type="button" aria-pressed="false">Start voice chat</button></div>'
+          : "") +
+        '<audio class="ai-audio" autoplay playsinline></audio>' +
         "</section></div>";
 
-      var container = root.querySelector(".ai-widget");
       var panel = root.querySelector(".ai-panel");
-      var button = root.querySelector(".ai-button");
-      var close = root.querySelector(".ai-close");
+      var openButton = root.querySelector(".ai-button");
+      var closeButton = root.querySelector(".ai-close");
       var messages = root.querySelector(".ai-messages");
+      var status = root.querySelector(".ai-status");
       var form = root.querySelector(".ai-form");
-      var input = root.querySelector(".ai-form input");
-      var sessionToken = sessionStorage.getItem("ai_widget_" + widgetId) || "";
+      var input = form && form.querySelector("input");
+      var sendButton = form && form.querySelector('button[type="submit"]');
+      var voiceButton = root.querySelector(".ai-voice");
+      var remoteAudio = root.querySelector(".ai-audio");
+      var sessionToken = "";
+      var sessionPromise = null;
+      var voicePeer = null;
+      var microphoneStream = null;
+      var voiceSessionToken = "";
+      var voiceStarting = false;
+      var voiceActive = false;
+      var voiceCancelled = false;
+      var sending = false;
 
-      button.addEventListener("click", function () {
+      function setStatus(message, isError) {
+        status.textContent = message || "";
+        status.classList.toggle("error", Boolean(isError));
+      }
+
+      function setTextDisabled(disabled) {
+        if (input) input.disabled = disabled || sending;
+        if (sendButton) sendButton.disabled = disabled || sending;
+      }
+
+      openButton.addEventListener("click", function () {
         panel.hidden = false;
-        button.hidden = true;
-        ensureSession();
+        openButton.hidden = true;
+        ensureSession().catch(function (error) {
+          setStatus(error.message || "Could not start chat.", true);
+        });
       });
-      close.addEventListener("click", function () {
+
+      closeButton.addEventListener("click", function () {
         panel.hidden = true;
-        button.hidden = false;
+        openButton.hidden = false;
+        if (voicePeer || voiceStarting) stopVoice();
       });
 
       function ensureSession() {
         if (sessionToken) return Promise.resolve(sessionToken);
-        return fetch(baseUrl + "/api/public/widgets/" + encodeURIComponent(widgetId) + "/sessions", { method: "POST" })
-          .then(function (response) {
-            if (!response.ok) throw new Error("Could not start session");
-            return response.json();
-          })
-          .then(function (session) {
-            sessionToken = session.sessionToken;
-            sessionStorage.setItem("ai_widget_" + widgetId, sessionToken);
-            if (session.firstPrompt) appendMessage("assistant", session.firstPrompt);
+        if (sessionPromise) return sessionPromise;
+        sessionPromise = fetch(baseUrl + "/api/public/widgets/" + encodeURIComponent(widgetId) + "/sessions", {
+          method: "POST",
+        })
+          .then(readResponse)
+          .then(function (result) {
+            if (!result.response.ok) {
+              throw new Error(result.body.message || "Could not start chat.");
+            }
+            sessionToken = result.body.sessionToken;
+            if (result.body.firstPrompt) appendMessage(messages, "assistant", result.body.firstPrompt);
             return sessionToken;
+          })
+          .catch(function (error) {
+            sessionPromise = null;
+            throw error;
+          });
+        return sessionPromise;
+      }
+
+      if (form) {
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          if (sending || voiceStarting || voiceActive) return;
+          var text = input.value.trim();
+          if (!text) return;
+
+          sending = true;
+          setTextDisabled(true);
+          setStatus("Sending message...");
+          appendMessage(messages, "user", text);
+
+          ensureSession()
+            .then(function (token) {
+              return fetch(baseUrl + "/api/public/widgets/" + encodeURIComponent(widgetId) + "/messages", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Widget-Session": token },
+                body: JSON.stringify({ content: text, idempotencyKey: createIdempotencyKey() }),
+              });
+            })
+            .then(readResponse)
+            .then(function (result) {
+              if (!result.response.ok) {
+                throw new Error(result.body.message || "Could not send message.");
+              }
+              input.value = "";
+              appendMessage(messages, "assistant", result.body.message || "I couldn't generate a reply. Please try again.");
+              setStatus("");
+            })
+            .catch(function (error) {
+              setStatus(error.message || "Could not send message. Please try again.", true);
+            })
+            .finally(function () {
+              sending = false;
+              setTextDisabled(voiceStarting || voiceActive);
+            });
+        });
+      }
+
+      if (voiceButton) {
+        voiceButton.addEventListener("click", function () {
+          if (voiceStarting) return;
+          if (voiceActive || voicePeer) {
+            stopVoice();
+          } else {
+            startVoice();
+          }
+        });
+      }
+
+      function startVoice() {
+        voiceStarting = true;
+        voiceCancelled = false;
+        voiceButton.disabled = true;
+        voiceButton.textContent = "Connecting...";
+        setTextDisabled(true);
+        setStatus("Allow microphone access to start voice chat.");
+
+        var token = "";
+        (async function () {
+          try {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+              throw new Error("Voice chat requires a supported browser and a secure connection.");
+            }
+            if (!window.RTCPeerConnection) {
+              throw new Error("Voice chat is not supported in this browser.");
+            }
+            microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            if (voiceCancelled) throw new Error("Voice chat was cancelled.");
+
+            token = await ensureSession();
+            if (voiceCancelled) throw new Error("Voice chat was cancelled.");
+            voiceSessionToken = token;
+            setStatus("Connecting to voice chat...");
+
+            voicePeer = new RTCPeerConnection();
+            voicePeer.addEventListener("track", function (event) {
+              remoteAudio.srcObject = event.streams[0];
+              remoteAudio.play().catch(function () {
+                setStatus("Voice is connected. Tap the page to enable audio playback.");
+              });
+            });
+            voicePeer.addEventListener("connectionstatechange", function () {
+              if (voicePeer && voicePeer.connectionState === "connected") {
+                voiceActive = true;
+                voiceStarting = false;
+                voiceButton.disabled = false;
+                voiceButton.textContent = "End voice chat";
+                voiceButton.setAttribute("aria-pressed", "true");
+                setTextDisabled(true);
+                setStatus("Voice chat is connected. Speak naturally, or end the call when finished.");
+              } else if (voicePeer && voicePeer.connectionState === "failed") {
+                failVoice("Voice connection failed. Check your connection and try again.");
+              }
+            });
+
+            var events = voicePeer.createDataChannel("oai-events");
+            events.addEventListener("message", function (event) {
+              var message;
+              try {
+                message = JSON.parse(event.data);
+              } catch {
+                setStatus("Received an invalid voice session event.", true);
+                return;
+              }
+              if (message.type === "error") {
+                failVoice(message.error && message.error.message || "Voice chat encountered an error.");
+              }
+            });
+            microphoneStream.getAudioTracks().forEach(function (track) {
+              voicePeer.addTrack(track, microphoneStream);
+            });
+
+            var offer = await voicePeer.createOffer();
+            await voicePeer.setLocalDescription(offer);
+            await waitForIceGathering(voicePeer);
+            if (voiceCancelled) throw new Error("Voice chat was cancelled.");
+
+            var result = await fetch(baseUrl + "/api/public/widgets/" + encodeURIComponent(widgetId) + "/voice/session", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-Widget-Session": token },
+              body: JSON.stringify({ sdp: voicePeer.localDescription.sdp }),
+            }).then(readResponse);
+            if (!result.response.ok) {
+              throw new Error(result.body.message || "Could not start voice chat.");
+            }
+            if (voiceCancelled) throw new Error("Voice chat was cancelled.");
+            if (!result.body.sdp) throw new Error("The voice service returned an invalid answer.");
+            await voicePeer.setRemoteDescription({ type: "answer", sdp: result.body.sdp });
+          } catch (error) {
+            releaseVoiceResources();
+            voiceSessionToken = "";
+            voiceActive = false;
+            voiceStarting = false;
+            voiceButton.disabled = false;
+            voiceButton.textContent = "Start voice chat";
+            voiceButton.setAttribute("aria-pressed", "false");
+            setTextDisabled(false);
+            var message = error.message || "Could not start voice chat.";
+            if (token) {
+              try {
+                await endVoiceSession(token);
+              } catch {
+                message += " The temporary session could not be closed; refresh the page before retrying.";
+              }
+            }
+            setStatus(message, true);
+          }
+        })();
+      }
+
+      function failVoice(message) {
+        voiceCancelled = true;
+        var token = voiceSessionToken;
+        releaseVoiceResources();
+        voiceSessionToken = "";
+        voiceStarting = false;
+        voiceActive = false;
+        voiceButton.disabled = false;
+        voiceButton.textContent = "Start voice chat";
+        voiceButton.setAttribute("aria-pressed", "false");
+        setTextDisabled(false);
+        setStatus(message, true);
+        if (token) {
+          endVoiceSession(token).catch(function () {
+            setStatus(message + " The server could not confirm session cleanup.", true);
+          });
+        }
+      }
+
+      function stopVoice() {
+        voiceCancelled = true;
+        var token = voiceSessionToken;
+        releaseVoiceResources();
+        voiceSessionToken = "";
+        voiceStarting = false;
+        voiceActive = false;
+        voiceButton.disabled = false;
+        voiceButton.textContent = "Start voice chat";
+        voiceButton.setAttribute("aria-pressed", "false");
+        setTextDisabled(false);
+        if (!token) {
+          setStatus("Voice chat ended.");
+          return;
+        }
+        endVoiceSession(token)
+          .then(function () {
+            setStatus("Voice chat ended.");
+          })
+          .catch(function () {
+            setStatus("Voice ended, but the server could not confirm session cleanup.", true);
           });
       }
 
-      form.addEventListener("submit", function (event) {
-        event.preventDefault();
-        var text = input.value.trim();
-        if (!text) return;
-        input.value = "";
-        appendMessage("user", text);
-        ensureSession()
-          .then(function (token) {
-            return fetch(baseUrl + "/api/public/widgets/" + encodeURIComponent(widgetId) + "/messages", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "X-Widget-Session": token },
-              body: JSON.stringify({ content: text, idempotencyKey: "msg_" + Date.now() + "_" + text.length }),
-            });
-          })
-          .then(function (response) {
-            if (!response.ok) throw new Error("Could not send message");
-            return response.json();
-          })
-          .then(function (body) {
-            appendMessage("assistant", body.message);
-          })
-          .catch(function (error) {
-            appendMessage("assistant", error.message || "Could not send message.");
+      function releaseVoiceResources() {
+        if (voicePeer) {
+          voicePeer.close();
+          voicePeer = null;
+        }
+        if (microphoneStream) {
+          microphoneStream.getTracks().forEach(function (track) {
+            track.stop();
           });
-      });
+          microphoneStream = null;
+        }
+        remoteAudio.srcObject = null;
+      }
 
-      function appendMessage(role, text) {
-        var item = document.createElement("div");
-        item.className = "ai-message " + role;
-        item.textContent = text;
-        messages.appendChild(item);
-        messages.scrollTop = messages.scrollHeight;
+      function endVoiceSession(token) {
+        return fetch(baseUrl + "/api/public/widgets/" + encodeURIComponent(widgetId) + "/voice/end", {
+          method: "POST",
+          headers: { "X-Widget-Session": token },
+        }).then(function (response) {
+          if (!response.ok) throw new Error("Could not close voice session.");
+        });
       }
 
       if (config.initialOpen) {
-        button.hidden = true;
-        ensureSession();
+        openButton.hidden = true;
+        ensureSession().catch(function (error) {
+          setStatus(error.message || "Could not start chat.", true);
+        });
       }
     })
-    .catch(function () {
-      root.textContent = "AI chat is unavailable.";
+    .catch(function (error) {
+      root.textContent = "AI chat is unavailable. " + (error.message || "Please try again later.");
     });
+
+  function waitForIceGathering(peer) {
+    if (peer.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise(function (resolve, reject) {
+      var timeout = setTimeout(function () {
+        cleanup();
+        reject(new Error("Could not establish a voice connection. Please try again."));
+      }, 10000);
+      function checkState() {
+        if (peer.iceGatheringState === "complete") {
+          cleanup();
+          resolve();
+        }
+      }
+      function cleanup() {
+        clearTimeout(timeout);
+        peer.removeEventListener("icegatheringstatechange", checkState);
+      }
+      peer.addEventListener("icegatheringstatechange", checkState);
+    });
+  }
+
+  function readResponse(response) {
+    return response.json()
+      .catch(function () {
+        return {};
+      })
+      .then(function (body) {
+        return { response: response, body: body };
+      });
+  }
+
+  function createIdempotencyKey() {
+    if (window.crypto && window.crypto.randomUUID) return "msg_" + window.crypto.randomUUID();
+    return "msg_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+  }
+
+  function appendMessage(messages, role, text) {
+    var item = document.createElement("div");
+    item.className = "ai-message " + role;
+    item.textContent = text;
+    messages.appendChild(item);
+    messages.scrollTop = messages.scrollHeight;
+  }
 
   function escapeHtml(value) {
     return String(value || "").replace(/[&<>"']/g, function (character) {

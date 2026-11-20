@@ -26,6 +26,7 @@ import {
   VoiceSession,
   Widget,
   WidgetDomain,
+  Op,
   connectAndSync,
   sequelize,
 } from "./db.js";
@@ -771,6 +772,29 @@ app.post("/api/public/widgets/:widgetId/messages", async (req, res) => {
     return res.status(400).json({ message: "Message content must be between 1 and 4000 characters." });
   }
   const conversation = voiceSession.conversation;
+  if (idempotencyKey) {
+    const existingUserMessage = await Message.findOne({
+      where: { conversationId: conversation.id, role: "user", idempotencyKey },
+    });
+    if (existingUserMessage) {
+      const existingReply = await Message.findOne({
+        where: {
+          conversationId: conversation.id,
+          role: "assistant",
+          createdAt: { [Op.gte]: existingUserMessage.createdAt },
+        },
+        order: [["createdAt", "ASC"]],
+      });
+      if (!existingReply) {
+        return res.status(409).json({ message: "This message is still being processed. Please retry shortly." });
+      }
+      return res.json({
+        message: existingReply.content,
+        providerResponseId: existingReply.providerResponseId,
+      });
+    }
+  }
+
   if (conversation.intakeState?.active) {
     const state = conversation.intakeState;
     let reply;
@@ -866,10 +890,6 @@ app.post("/api/public/widgets/:widgetId/messages", async (req, res) => {
     res.set("Cache-Control", "no-store");
     return res.json({ message: reply, intake: { completed: state.completed, pendingCode: state.pendingCode } });
   }
-  if (idempotencyKey) {
-    const existing = await Message.findOne({ where: { idempotencyKey } });
-    if (existing) return res.json({ message: existing.content, providerResponseId: existing.providerResponseId });
-  }
   if (!openaiClient) {
     return res.status(503).json({ message: "OpenAI is not configured on the server." });
   }
@@ -881,6 +901,14 @@ app.post("/api/public/widgets/:widgetId/messages", async (req, res) => {
     configuration?.instructions || "",
     configuration?.knowledgeBase ? `Knowledge base:\n${configuration.knowledgeBase}` : "",
   ].filter(Boolean).join("\n\n");
+  const previousResponse = await Message.findOne({
+    where: {
+      conversationId: voiceSession.conversationId,
+      role: "assistant",
+      providerResponseId: { [Op.ne]: null },
+    },
+    order: [["createdAt", "DESC"]],
+  });
   const started = Date.now();
   let providerResponse;
   try {
@@ -890,6 +918,9 @@ app.post("/api/public/widgets/:widgetId/messages", async (req, res) => {
       input: content,
       max_output_tokens: Math.min(Math.max(Number(configuration?.maxTokens || 1000), 1), 4096),
       temperature: Math.min(Math.max(Number(configuration?.temperature || 0.7), 0), 2),
+      ...(previousResponse?.providerResponseId
+        ? { previous_response_id: previousResponse.providerResponseId }
+        : {}),
     });
   } catch (error) {
     await ApiLog.create({ provider: "openai", endpoint: "responses.create", statusCode: 502, latencyMs: Date.now() - started, error: error.message });
@@ -897,6 +928,16 @@ app.post("/api/public/widgets/:widgetId/messages", async (req, res) => {
     return res.status(502).json({ message: "The AI provider could not complete the request." });
   }
   const reply = providerResponse.output_text || "";
+  if (!reply.trim()) {
+    await ApiLog.create({
+      provider: "openai",
+      endpoint: "responses.create",
+      statusCode: 502,
+      latencyMs: Date.now() - started,
+      error: "The AI provider returned an empty response.",
+    });
+    return res.status(502).json({ message: "The AI provider returned an empty response. Please try again." });
+  }
   await Message.create({
     conversationId: voiceSession.conversationId,
     role: "user",
@@ -936,33 +977,44 @@ app.post("/api/public/widgets/:widgetId/voice/session", async (req, res) => {
   const voiceSession = await findPublicSession(req);
   if (!voiceSession) return res.status(401).json({ message: "A valid widget session is required." });
   if (!openaiClient) return res.status(503).json({ message: "OpenAI is not configured on the server." });
+  const sdp = String(req.body?.sdp || "").trim();
+  if (!sdp || sdp.length > 100_000) {
+    return res.status(400).json({ message: "A valid WebRTC offer is required." });
+  }
   try {
     const assistant = await Assistant.findByPk(widget.assistantId, {
       include: [{ model: AssistantConfiguration, as: "configuration" }],
     });
     const configuration = assistant?.configuration;
-    const intakeInstructions = configuration?.intakeEnabled !== false
-      ? " This assistant is also conducting a patient intake. Request consent before collecting health information, ask one question at a time, confirm the collected summary, and never provide a diagnosis or emergency advice."
-      : "";
-    const providerSession = await openaiClient.realtime.clientSecrets.create({
+    const instructions = [
+      configuration?.instructions || "You are a helpful clinic assistant. Be warm, brief, and clear.",
+      configuration?.knowledgeBase ? `Knowledge base:\n${configuration.knowledgeBase}` : "",
+      "Voice chat is for general clinic information only. Do not collect sensitive personal or health information, diagnose conditions, or recommend treatment. Direct patient-specific requests to clinic staff or the clinic's secure intake channel. For emergencies, advise contacting local emergency services.",
+    ].filter(Boolean).join("\n\n");
+    const liveSession = await openaiClient.live.create({
       session: {
-        type: "realtime",
-        model: "gpt-realtime",
-        instructions: (configuration?.instructions || "You are a helpful AI assistant.") + intakeInstructions,
-        audio: { output: { voice: configuration?.voice || process.env.OPENAI_VOICE || "alloy" } },
+        model: "gpt-live-1",
+        instructions,
+        audio: {
+          output: {
+            voice: configuration?.voice || process.env.OPENAI_VOICE || "alloy",
+          },
+        },
       },
+      transport: { type: "webrtc", sdp },
     });
     await voiceSession.update({
-      providerSessionId: providerSession.id || null,
-      expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+      providerSessionId: liveSession.session.id,
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      endedAt: null,
     });
     await UsageLog.create({ assistantId: widget.assistantId, widgetId: widget.id, eventType: "voice_session" });
     res.set("Access-Control-Allow-Origin", origin);
     res.set("Cache-Control", "no-store");
-    res.json({ clientSecret: providerSession.value, expiresAt: voiceSession.expiresAt });
+    res.status(201).json({ sdp: liveSession.transport.sdp, expiresAt: voiceSession.expiresAt });
   } catch (error) {
-    await ApiLog.create({ provider: "openai", endpoint: "realtime.clientSecrets.create", statusCode: 502, latencyMs: 0, error: error.message });
-    res.status(502).json({ message: "Could not initialize the voice session." });
+    await ApiLog.create({ provider: "openai", endpoint: "live.create", statusCode: 502, latencyMs: 0, error: error.message });
+    res.status(502).json({ message: "Could not initialize voice chat." });
   }
 });
 
@@ -970,7 +1022,7 @@ app.post("/api/public/widgets/:widgetId/voice/end", async (req, res) => {
   if (!requireDatabase(res)) return;
   const voiceSession = await findPublicSession(req);
   if (!voiceSession) return res.status(401).json({ message: "A valid widget session is required." });
-  await voiceSession.update({ status: "ended", endedAt: new Date() });
+  await voiceSession.update({ providerSessionId: null, endedAt: new Date() });
   res.sendStatus(204);
 });
 
