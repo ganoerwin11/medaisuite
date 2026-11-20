@@ -31,8 +31,15 @@ import { TelephonyProviderAdapter } from "./telephony/TelephonyProviderAdapter.j
 import { useAuth } from "./auth/AuthContext.jsx";
 import { Login } from "./auth/Login.jsx";
 import { UserManagement } from "./auth/UserManagement.jsx";
+import { VoiceWidgetManager } from "./VoiceWidgetManager.jsx";
+import { Bot } from "lucide-react";
 
 const navigation = [
+  {
+    label: "AI Assistants",
+    icon: Bot,
+    view: "assistants",
+  },
   {
     label: "AI Receptionist",
     icon: Headphones,
@@ -878,6 +885,8 @@ function Dashboard() {
             onSave={() => saveQuestionSetup(customQuestions)}
             onToast={setToast}
           />
+        ) : view === "assistants" ? (
+          <VoiceWidgetManager onToast={setToast} />
         ) : (
           <Receptionist
             providerAdapter={telephonyAdapter}

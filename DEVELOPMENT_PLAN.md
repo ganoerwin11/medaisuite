@@ -16,9 +16,9 @@ architecture (not the routes/controllers/services layout suggested by the origin
   ([saveIntake.js](../server/saveIntake.js)).
 - **Telephony/AI**: Twilio voice webhooks (incoming call, speech gather, call status, recording
   status) and OpenAI-generated greetings, already wired end-to-end.
-- **Questionnaire engine**: A-G sections (Patient Info, Reason for Visit, Medical History,
-  Medications/Allergies, Current Symptoms, Appointment, Additional Info) with `showIf` branching,
-  stored in the `questionnaire_questions` table and editable from the dashboard's Question Setup page.
+- **Questionnaire data**: A-G and custom questions are loaded from the `questionnaire_questions`
+  table and edited from the dashboard's Question Setup page; there is no static questionnaire
+  definitions module.
 - **Database**: `patients`, `calls`, `call_transcripts`, `intake_records`, `questionnaire_answers`,
   `ai_summaries`, `providers`, `availability_slots`, `appointments`, `orders`, `receptionist_settings`.
 - **Frontend** ([client/src/App.jsx](../client/src/App.jsx)): AdminLTE-style dashboard (Bootstrap-free,
@@ -38,7 +38,7 @@ Sequelize migrations (schema is created via `sequelize.sync()`), and limited aut
 ## 2. Architecture conventions (follow these, do not restructure)
 
 - **Flat server modules**, not routes/controllers/services folders: one file per concern
-  (`db.js`, `questionnaire.js`, `callFlow.js`, `saveIntake.js`, `auth.js`, ...), all routes declared
+  (`db.js`, `callFlow.js`, `saveIntake.js`, `auth.js`, ...), all routes declared
   directly in `server.js`.
 - **Dual-mode data access**: every new admin feature must behave sensibly both with PostgreSQL
   connected (`pgReady === true`) and without it (in-memory fallback), matching the existing pattern
@@ -98,3 +98,54 @@ Full README setup/deployment instructions, migration documentation, voice-provid
 guide.
 
 See [TASKS.md](../TASKS.md) for the checkbox-level breakdown.
+
+## 9. New phase — OpenAI Voice Chat and Embeddable Widget Platform
+
+The specification requires a separate reusable assistant/widget platform while preserving the
+existing clinic receptionist, Twilio, patient, intake, and authentication features.
+
+### 9.1 Existing reusable foundations
+
+- Express route and middleware structure in `server.js`.
+- Sequelize/PostgreSQL schema in `db.js`, with `sequelize.sync()` and a demo fallback.
+- JWT authentication, role middleware, and a default administrator.
+- OpenAI and Twilio server dependencies.
+- React/Vite dashboard and existing custom CSS.
+- Existing call, transcript, summary, and consent records.
+
+### 9.2 Target additions
+
+- A normalized assistant configuration model, with widgets and widget domains as separate records.
+- Conversation and message records distinct from Twilio call records.
+- Voice-session lifecycle records and usage/API/security logs.
+- Administrator endpoints for assistant and widget CRUD, duplication, activation, identifier
+  rotation, domain allowlists, embed code, conversations, and analytics.
+- Public widget endpoints for configuration, short-lived sessions, text chat, and voice setup.
+- OpenAI Realtime/Responses integration implemented only on the server; the permanent API key must
+  never enter browser or embed code.
+- A standalone widget bundle loaded by an async `loader.js` script and rendered in Shadow DOM.
+- Dashboard text/voice chat controls, live widget preview, conversation management, and analytics.
+- Domain authorization combined with short-lived public credentials and server-side abuse controls.
+
+### 9.3 Implementation sequence
+
+1. Add voice-platform models and associations; verify PostgreSQL and fallback behavior.
+2. Add assistant management APIs/UI.
+3. Add server-side text chat and persisted conversations/messages.
+4. Add short-lived voice credentials and dashboard voice controls.
+5. Add widget builder, customization, domains, embed-code generation, and identifier controls.
+6. Build the standalone isolated widget bundle and loader.
+7. Add public-session validation, rate limits, security events, and usage limits.
+8. Add conversation management, export/delete controls, analytics, and privacy retention controls.
+9. Run tests/build and document deployment; test only external voice behavior against real
+   credentials and a real browser.
+
+### 9.4 Important compatibility constraints
+
+- Do not replace or remove existing Twilio clinic call flows.
+- Reuse existing auth conventions and role middleware.
+- Keep all assistant and widget CRUD admin-only.
+- Keep public widget responses free of API keys and privileged configuration.
+- Prefer JSON fields only for settings/response metadata that are not better represented by
+  normalized columns.
+- Keep PostgreSQL unavailable behavior explicit and testable; do not silently claim persistence.

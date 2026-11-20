@@ -1,24 +1,37 @@
 import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import express from "express";
+import cors from "cors";
 import OpenAI from "openai";
 import twilio from "twilio";
+import { saveQuestionnaire } from "./saveIntake.js";
 import {
   AiSummary,
+  ApiLog,
+  Assistant,
+  AssistantConfiguration,
   Call,
   CallTranscript,
+  Conversation,
   IntakeRecord,
+  Message,
   Order,
   Patient,
   ReceptionistSetting,
+  SecurityLog,
   User,
+  UsageLog,
+  VoiceSession,
+  Widget,
+  WidgetDomain,
   connectAndSync,
+  sequelize,
 } from "./db.js";
 import {
   readQuestions,
   saveLiveIntake,
-  seedQuestions,
   writeQuestions,
 } from "./saveIntake.js";
 import {
@@ -35,6 +48,7 @@ import {
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, "..", "dist");
+const publicWidgetDir = path.join(__dirname, "..", "public-widget");
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 if (IS_PRODUCTION) {
   // Behind the nginx reverse proxy, so req.protocol/req.ip reflect X-Forwarded-* headers.
@@ -256,7 +270,6 @@ async function initializeDatabase() {
       where: { id: 1 },
       defaults: { clinics: defaultClinics },
     });
-    await seedQuestions();
     receptionistQuestions = await readQuestions();
     await ensureDefaultAdmin();
 
@@ -275,6 +288,697 @@ async function initializeDatabase() {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+app.use(cors({ origin: true, credentials: false }));
+
+function serializeAssistant(assistant) {
+  const plain =
+    typeof assistant?.get === "function"
+      ? assistant.get({ plain: true })
+      : assistant;
+  return plain;
+}
+
+function validateColor(value, fallback) {
+  return /^#[0-9a-f]{6}$/i.test(String(value || "")) ? value : fallback;
+}
+
+function normalizeDomain(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  try {
+    const host = raw.includes("://") ? new URL(raw).hostname : raw.split("/")[0];
+    return host.replace(/^\*\./, "").replace(/\.$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function isOriginAuthorized(origin, domains) {
+  if (!origin) return false;
+  try {
+    const host = new URL(origin).hostname.toLowerCase().replace(/\.$/, "");
+    return domains.some((entry) => {
+      const domain = normalizeDomain(entry.domain);
+      return entry.active && (host === domain || host.endsWith(`.${domain}`));
+    });
+  } catch {
+    return false;
+  }
+}
+
+function createIntakeState(intakeEnabled) {
+  return intakeEnabled
+    ? {
+        active: true,
+        consent: null,
+        answers: {},
+        skipped: [],
+        pendingCode: "consent",
+        confirmed: null,
+        completed: false,
+        retries: 0,
+      }
+    : { active: false };
+}
+
+function dbConditionMet(condition, answers) {
+  if (!condition) return true;
+  if (condition.anyOf) return condition.anyOf.some((item) => dbConditionMet(item, answers));
+  const answer = answers[condition.code];
+  if (condition.answered) return Boolean(answer);
+  if (!answer) return false;
+  return answer.value === condition.is;
+}
+
+async function nextIntakeQuestion(state) {
+  const questions = await readQuestions();
+  return questions.find(
+    (question) =>
+      !state.answers[question.code] &&
+      !state.skipped.includes(question.code) &&
+      dbConditionMet(question.showIf, state.answers),
+  ) || null;
+}
+
+async function intakePrompt(state) {
+  if (state.pendingCode === "consent") {
+    return "I would like to collect a few details to share with our medical team. Do you consent to saving this intake information? Please say yes or no.";
+  }
+  if (state.pendingCode === "recap") {
+    const concern = state.answers.B02?.text || "not given";
+    const symptoms = state.answers.B03?.text || "not given";
+    const name = [state.answers.A02?.text, state.answers.A03?.text].filter(Boolean).join(" ") || "not given";
+    return `Let me confirm. Your name is ${name}, your main concern is ${concern}, and your symptoms are ${symptoms}. Is all of this correct?`;
+  }
+  const questions = await readQuestions();
+  const question = questions.find((item) => item.code === state.pendingCode);
+  return question?.prompt || "What else would you like to add?";
+}
+
+function parseYesNo(text) {
+  if (/\b(yes|yeah|yep|yup|sure|correct|absolutely|okay|ok)\b/i.test(text)) return "yes";
+  if (/\b(no|nope|nah|none|never|not)\b/i.test(text)) return "no";
+  return null;
+}
+
+async function normalizeDbAnswer(question, speech) {
+  const text = String(speech || "").trim();
+  if (!text) return null;
+  if (question.type === "yesno") {
+    const value = parseYesNo(text);
+    return value ? { text, value } : null;
+  }
+  if (question.type === "scale") {
+    const match = text.match(/\b(10|[1-9])\b/);
+    return match ? { text, value: Number(match[1]) } : null;
+  }
+  if (question.type === "choice") {
+    const lower = text.toLowerCase();
+    const exact = (question.options || []).find((option) => lower.includes(String(option).toLowerCase()));
+    return exact ? { text, value: exact } : null;
+  }
+  return { text, value: null };
+}
+
+const assistantConfigurationFields = [
+  "instructions",
+  "welcomeMessage",
+  "model",
+  "voice",
+  "language",
+  "temperature",
+  "maxTokens",
+  "knowledgeBase",
+  "tools",
+  "conversationLimit",
+  "usageLimit",
+  "intakeEnabled",
+];
+
+app.get("/api/assistants", requireAuth, requireRole("admin"), async (_req, res) => {
+  if (!requireDatabase(res)) return;
+  const assistants = await Assistant.findAll({
+    include: [{ model: AssistantConfiguration, as: "configuration" }],
+    order: [["createdAt", "DESC"]],
+  });
+  res.json(assistants);
+});
+
+app.post("/api/assistants", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const name = String(req.body?.name || "").trim();
+  if (!name || name.length > 120) {
+    return res.status(400).json({ message: "Assistant name is required." });
+  }
+  const configuration = Object.fromEntries(
+    assistantConfigurationFields
+      .filter((field) => req.body?.configuration?.[field] !== undefined)
+      .map((field) => [field, req.body.configuration[field]]),
+  );
+  const result = await sequelize.transaction(async (transaction) => {
+    const assistant = await Assistant.create(
+      { name, description: String(req.body.description || "").trim(), active: req.body.active !== false },
+      { transaction },
+    );
+    await AssistantConfiguration.create(
+      { assistantId: assistant.id, ...configuration },
+      { transaction },
+    );
+    return Assistant.findByPk(assistant.id, {
+      include: [{ model: AssistantConfiguration, as: "configuration" }],
+      transaction,
+    });
+  });
+  res.status(201).json(result);
+});
+
+app.get("/api/assistants/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const assistant = await Assistant.findByPk(req.params.id, {
+    include: [{ model: AssistantConfiguration, as: "configuration" }],
+  });
+  if (!assistant) return res.status(404).json({ message: "Assistant not found." });
+  res.json(assistant);
+});
+
+app.patch("/api/assistants/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const assistant = await Assistant.findByPk(req.params.id);
+  if (!assistant) return res.status(404).json({ message: "Assistant not found." });
+  try {
+    await sequelize.transaction(async (transaction) => {
+      const assistantFields = {};
+      if (req.body?.name !== undefined) {
+        const name = String(req.body.name).trim();
+        if (!name || name.length > 120) throw Object.assign(new Error("Invalid assistant name"), { status: 400 });
+        assistantFields.name = name;
+      }
+      if (req.body?.description !== undefined) assistantFields.description = String(req.body.description).trim();
+      if (req.body?.active !== undefined) assistantFields.active = Boolean(req.body.active);
+      await assistant.update(assistantFields, { transaction });
+
+      if (req.body?.configuration) {
+        const configuration = await AssistantConfiguration.findOne({ where: { assistantId: assistant.id }, transaction });
+        const updates = Object.fromEntries(
+          assistantConfigurationFields
+            .filter((field) => req.body.configuration[field] !== undefined)
+            .map((field) => [field, req.body.configuration[field]]),
+        );
+        if (configuration) await configuration.update(updates, { transaction });
+        else await AssistantConfiguration.create({ assistantId: assistant.id, ...updates }, { transaction });
+      }
+    });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    throw error;
+  }
+  const updated = await Assistant.findByPk(req.params.id, {
+    include: [{ model: AssistantConfiguration, as: "configuration" }],
+  });
+  return res.json(updated);
+});
+
+app.delete("/api/assistants/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const deleted = await Assistant.destroy({ where: { id: req.params.id } });
+  if (!deleted) return res.status(404).json({ message: "Assistant not found." });
+  res.sendStatus(204);
+});
+
+app.post("/api/assistants/:id/duplicate", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const source = await Assistant.findByPk(req.params.id, {
+    include: [{ model: AssistantConfiguration, as: "configuration" }],
+  });
+  if (!source) return res.status(404).json({ message: "Assistant not found." });
+  const result = await sequelize.transaction(async (transaction) => {
+    const copy = await source.constructor.create(
+      { name: `${source.name} Copy`.slice(0, 120), description: source.description, active: false },
+      { transaction },
+    );
+    const sourceConfiguration = source.configuration?.get
+      ? source.configuration.get({ plain: true })
+      : source.configuration || {};
+    const { id, assistantId, createdAt, updatedAt, ...configuration } = sourceConfiguration;
+    await AssistantConfiguration.create({ ...configuration, assistantId: copy.id }, { transaction });
+    return Assistant.findByPk(copy.id, {
+      include: [{ model: AssistantConfiguration, as: "configuration" }],
+      transaction,
+    });
+  });
+  res.status(201).json(result);
+});
+
+const widgetFields = [
+  "name", "title", "welcomeMessage", "primaryColor", "secondaryColor", "buttonColor",
+  "position", "size", "avatarUrl", "fontStyle", "initialOpen", "voiceEnabled",
+  "textEnabled", "mobileBehavior", "active",
+];
+
+app.get("/api/widgets", requireAuth, requireRole("admin"), async (_req, res) => {
+  if (!requireDatabase(res)) return;
+  const widgets = await Widget.findAll({
+    include: [
+      { model: Assistant, as: "assistant" },
+      { model: WidgetDomain, as: "domains" },
+    ],
+    order: [["createdAt", "DESC"]],
+  });
+  res.json(widgets);
+});
+
+app.post("/api/widgets", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const assistant = await Assistant.findByPk(req.body?.assistantId);
+  if (!assistant) return res.status(400).json({ message: "A valid assistant is required." });
+  const name = String(req.body?.name || "").trim();
+  if (!name) return res.status(400).json({ message: "Widget name is required." });
+  const updates = Object.fromEntries(
+    widgetFields
+      .filter((field) => req.body?.[field] !== undefined)
+      .map((field) => [field, req.body[field]]),
+  );
+  updates.primaryColor = validateColor(updates.primaryColor, "#7c3aed");
+  updates.secondaryColor = validateColor(updates.secondaryColor, "#f5f3ff");
+  updates.buttonColor = validateColor(updates.buttonColor, "#7c3aed");
+  const widget = await Widget.create({
+    assistantId: assistant.id,
+    publicId: `wd_${randomUUID().replaceAll("-", "")}`,
+    name,
+    title: String(req.body.title || assistant.name).trim(),
+    ...updates,
+  });
+  if (Array.isArray(req.body.domains)) {
+    await Promise.all(req.body.domains.map((domain) => {
+      const normalized = normalizeDomain(domain);
+      return normalized ? WidgetDomain.create({ widgetId: widget.id, domain: normalized }) : null;
+    }));
+  }
+  res.status(201).json(await Widget.findByPk(widget.id, {
+    include: [{ model: Assistant, as: "assistant" }, { model: WidgetDomain, as: "domains" }],
+  }));
+});
+
+app.get("/api/widgets/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const widget = await Widget.findByPk(req.params.id, {
+    include: [{ model: Assistant, as: "assistant" }, { model: WidgetDomain, as: "domains" }],
+  });
+  if (!widget) return res.status(404).json({ message: "Widget not found." });
+  res.json(widget);
+});
+
+app.patch("/api/widgets/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const widget = await Widget.findByPk(req.params.id);
+  if (!widget) return res.status(404).json({ message: "Widget not found." });
+  await sequelize.transaction(async (transaction) => {
+    const updates = Object.fromEntries(
+      widgetFields
+        .filter((field) => req.body?.[field] !== undefined)
+        .map((field) => [field, req.body[field]]),
+    );
+    if (updates.primaryColor) updates.primaryColor = validateColor(updates.primaryColor, "#7c3aed");
+    if (updates.secondaryColor) updates.secondaryColor = validateColor(updates.secondaryColor, "#f5f3ff");
+    if (updates.buttonColor) updates.buttonColor = validateColor(updates.buttonColor, "#7c3aed");
+    await widget.update(updates, { transaction });
+    if (Array.isArray(req.body.domains)) {
+      await WidgetDomain.destroy({ where: { widgetId: widget.id }, transaction });
+      for (const domain of req.body.domains) {
+        const normalized = normalizeDomain(domain);
+        if (normalized) await WidgetDomain.create({ widgetId: widget.id, domain: normalized }, { transaction });
+      }
+    }
+  });
+  res.json(await Widget.findByPk(widget.id, {
+    include: [{ model: Assistant, as: "assistant" }, { model: WidgetDomain, as: "domains" }],
+  }));
+});
+
+app.delete("/api/widgets/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const deleted = await Widget.destroy({ where: { id: req.params.id } });
+  if (!deleted) return res.status(404).json({ message: "Widget not found." });
+  res.sendStatus(204);
+});
+
+app.post("/api/widgets/:id/regenerate", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const widget = await Widget.findByPk(req.params.id);
+  if (!widget) return res.status(404).json({ message: "Widget not found." });
+  await widget.update({ publicId: `wd_${randomUUID().replaceAll("-", "")}` });
+  res.json({ publicId: widget.publicId });
+});
+
+app.get("/api/widgets/:id/embed", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const widget = await Widget.findByPk(req.params.id, { include: [{ model: Assistant, as: "assistant" }] });
+  if (!widget) return res.status(404).json({ message: "Widget not found." });
+  const origin = `${req.protocol}://${req.get("host")}`;
+  const snippet = `<script\n  src="${origin}/widget/loader.js"\n  data-assistant-id="${widget.assistant.publicId}"\n  data-widget-id="${widget.publicId}"\n  async>\n</script>`;
+  res.json({ snippet, publicId: widget.publicId, assistantId: widget.assistant.publicId });
+});
+
+function publicOrigin(req) {
+  const origin = String(req.get("origin") || "").trim();
+  if (!origin) return "";
+  try {
+    return new URL(origin).origin;
+  } catch {
+    return "";
+  }
+}
+
+app.get("/api/public/widgets/:widgetId", async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const widget = await Widget.findOne({
+    where: { publicId: req.params.widgetId, active: true },
+    include: [
+      { model: Assistant, as: "assistant", where: { active: true } },
+      { model: WidgetDomain, as: "domains" },
+    ],
+  });
+  if (!widget) return res.status(404).json({ message: "Widget unavailable." });
+  const origin = publicOrigin(req);
+  if (origin && !isOriginAuthorized(origin, widget.domains || [])) {
+    await SecurityLog.create({ eventType: "widget_origin_denied", severity: "warning", origin, details: { widgetId: widget.id } });
+    return res.status(403).json({ message: "This widget is not authorized for this website." });
+  }
+  const plain = widget.get({ plain: true });
+  const assistant = await Assistant.findByPk(widget.assistantId, {
+    include: [{ model: AssistantConfiguration, as: "configuration" }],
+  });
+  const intakeEnabled = assistant?.configuration?.intakeEnabled !== false;
+  res.set("Access-Control-Allow-Origin", origin || "*");
+  res.set("Cache-Control", "no-store");
+  res.json({
+    publicId: widget.publicId,
+    name: plain.name,
+    title: plain.title,
+    welcomeMessage: plain.welcomeMessage,
+    primaryColor: plain.primaryColor,
+    secondaryColor: plain.secondaryColor,
+    buttonColor: plain.buttonColor,
+    position: plain.position,
+    size: plain.size,
+    avatarUrl: plain.avatarUrl,
+    fontStyle: plain.fontStyle,
+    initialOpen: plain.initialOpen,
+    voiceEnabled: plain.voiceEnabled,
+    textEnabled: plain.textEnabled,
+    mobileBehavior: plain.mobileBehavior,
+    intakeEnabled,
+  });
+});
+
+app.post("/api/public/widgets/:widgetId/sessions", async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const widget = await Widget.findOne({
+    where: { publicId: req.params.widgetId, active: true },
+    include: [
+      { model: Assistant, as: "assistant", where: { active: true } },
+      { model: WidgetDomain, as: "domains" },
+    ],
+  });
+  if (!widget) return res.status(404).json({ message: "Widget unavailable." });
+  const origin = publicOrigin(req);
+  if (!isOriginAuthorized(origin, widget.domains || [])) {
+    await SecurityLog.create({ eventType: "widget_session_denied", severity: "warning", origin: origin || null, details: { widgetId: widget.id } });
+    return res.status(403).json({ message: "This widget is not authorized for this website." });
+  }
+  const publicSessionId = `conv_${randomUUID().replaceAll("-", "")}`;
+  const sessionToken = `sess_${randomUUID().replaceAll("-", "")}`;
+  const assistant = await Assistant.findByPk(widget.assistantId, {
+    include: [{ model: AssistantConfiguration, as: "configuration" }],
+  });
+  const intakeState = createIntakeState(assistant?.configuration?.intakeEnabled !== false);
+  const conversation = await Conversation.create({
+    publicSessionId,
+    assistantId: widget.assistantId,
+    widgetId: widget.id,
+    kind: "text",
+    originDomain: origin ? new URL(origin).hostname : null,
+    intakeState,
+  });
+  await VoiceSession.create({
+    conversationId: conversation.id,
+    sessionToken,
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+  });
+  res.set("Access-Control-Allow-Origin", origin);
+  res.set("Cache-Control", "no-store");
+  res.json({
+    sessionToken,
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    publicSessionId,
+    intakeEnabled: intakeState.active,
+    firstPrompt: intakeState.active ? await intakePrompt(intakeState) : null,
+  });
+});
+
+async function findPublicSession(req) {
+  const sessionToken = String(req.get("x-widget-session") || "").trim();
+  if (!sessionToken) return null;
+  const voiceSession = await VoiceSession.findOne({
+    where: { sessionToken, status: "active" },
+    include: [{ model: Conversation, as: "conversation" }],
+  });
+  if (!voiceSession || voiceSession.expiresAt <= new Date()) return null;
+  return voiceSession;
+}
+
+app.post("/api/public/widgets/:widgetId/messages", async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const widget = await Widget.findOne({
+    where: { publicId: req.params.widgetId, active: true },
+    include: [
+      { model: Assistant, as: "assistant", where: { active: true } },
+      { model: WidgetDomain, as: "domains" },
+    ],
+  });
+  if (!widget) return res.status(404).json({ message: "Widget unavailable." });
+  const origin = publicOrigin(req);
+  if (!isOriginAuthorized(origin, widget.domains || [])) {
+    return res.status(403).json({ message: "This widget is not authorized for this website." });
+  }
+  const voiceSession = await findPublicSession(req);
+  if (!voiceSession?.conversation) {
+    return res.status(401).json({ message: "A valid widget session is required." });
+  }
+  const content = String(req.body?.content || "").trim();
+  const idempotencyKey = String(req.body?.idempotencyKey || "").trim();
+  if (!content || content.length > 4000) {
+    return res.status(400).json({ message: "Message content must be between 1 and 4000 characters." });
+  }
+  const conversation = voiceSession.conversation;
+  if (conversation.intakeState?.active) {
+    const state = conversation.intakeState;
+    let reply;
+
+    if (state.pendingCode === "consent") {
+      const consent = parseYesNo(content);
+      if (!consent) {
+        reply = "Please answer yes or no. " + await intakePrompt(state);
+      } else if (consent === "no") {
+        state.completed = true;
+        state.consent = false;
+        reply = "No problem. I will not save an intake record. If you need help, you can ask a general question.";
+      } else {
+        state.consent = true;
+        const question = await nextIntakeQuestion(state);
+        state.pendingCode = question?.code || "recap";
+        reply = await intakePrompt(state);
+      }
+    } else if (state.pendingCode === "recap") {
+      const confirmed = parseYesNo(content);
+      if (!confirmed) {
+        reply = "Please answer yes or no. " + await intakePrompt(state);
+      } else {
+        state.confirmed = confirmed === "yes";
+        state.completed = true;
+        if (state.confirmed && pgReady) {
+          try {
+            await saveQuestionnaire({
+              callId: null,
+              from: state.answers.A05?.text || "",
+              dataConsent: true,
+              confirmed: true,
+              answers: state.answers,
+              source: "ai_widget",
+              extraNotes: "Collected through the embeddable AI voice/text intake widget.",
+              custom: [],
+              skipped: state.skipped,
+            });
+          } catch (error) {
+            await SecurityLog.create({
+              eventType: "intake_save_failed",
+              severity: "error",
+              origin,
+              details: { widgetId: widget.id, error: error.message },
+            });
+          }
+        }
+        reply = state.confirmed
+          ? "Thank you. Your intake has been completed and submitted to the care team for review."
+          : "Thank you. Your information needs review by the care team before it is finalized.";
+      }
+    } else {
+      const questions = await readQuestions();
+      const question = questions.find((item) => item.code === state.pendingCode);
+      const answer = question ? await normalizeDbAnswer(question, content) : null;
+      if (!answer) {
+        state.retries = Number(state.retries || 0) + 1;
+        if (state.retries > 2) {
+          if (question) state.skipped.push(question.code);
+          state.retries = 0;
+        } else {
+          reply = "I did not catch that clearly. " + await intakePrompt(state);
+        }
+      } else {
+        state.retries = 0;
+        state.answers[question.code] = answer;
+      }
+      if (!reply) {
+        const nextQuestion = await nextIntakeQuestion(state);
+        state.pendingCode = nextQuestion?.code || "recap";
+        reply = await intakePrompt(state);
+      }
+    }
+
+    await conversation.update({ intakeState: state });
+    await Message.create({
+      conversationId: conversation.id,
+      role: "user",
+      content,
+      idempotencyKey: idempotencyKey || null,
+    });
+    await Message.create({
+      conversationId: conversation.id,
+      role: "assistant",
+      content: reply,
+    });
+    await UsageLog.create({
+      assistantId: widget.assistantId,
+      widgetId: widget.id,
+      eventType: "intake_message",
+    });
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Cache-Control", "no-store");
+    return res.json({ message: reply, intake: { completed: state.completed, pendingCode: state.pendingCode } });
+  }
+  if (idempotencyKey) {
+    const existing = await Message.findOne({ where: { idempotencyKey } });
+    if (existing) return res.json({ message: existing.content, providerResponseId: existing.providerResponseId });
+  }
+  if (!openaiClient) {
+    return res.status(503).json({ message: "OpenAI is not configured on the server." });
+  }
+  const assistant = await Assistant.findByPk(widget.assistantId, {
+    include: [{ model: AssistantConfiguration, as: "configuration" }],
+  });
+  const configuration = assistant?.configuration;
+  const instructions = [
+    configuration?.instructions || "",
+    configuration?.knowledgeBase ? `Knowledge base:\n${configuration.knowledgeBase}` : "",
+  ].filter(Boolean).join("\n\n");
+  const started = Date.now();
+  let providerResponse;
+  try {
+    providerResponse = await openaiClient.responses.create({
+      model: configuration?.model || process.env.OPENAI_MODEL || "gpt-4o-mini",
+      instructions: instructions || "You are a helpful AI assistant.",
+      input: content,
+      max_output_tokens: Math.min(Math.max(Number(configuration?.maxTokens || 1000), 1), 4096),
+      temperature: Math.min(Math.max(Number(configuration?.temperature || 0.7), 0), 2),
+    });
+  } catch (error) {
+    await ApiLog.create({ provider: "openai", endpoint: "responses.create", statusCode: 502, latencyMs: Date.now() - started, error: error.message });
+    await SecurityLog.create({ eventType: "openai_request_failed", severity: "error", origin, details: { widgetId: widget.id } });
+    return res.status(502).json({ message: "The AI provider could not complete the request." });
+  }
+  const reply = providerResponse.output_text || "";
+  await Message.create({
+    conversationId: voiceSession.conversationId,
+    role: "user",
+    content,
+    idempotencyKey: idempotencyKey || null,
+  });
+  await Message.create({
+    conversationId: voiceSession.conversationId,
+    role: "assistant",
+    content: reply,
+    providerResponseId: providerResponse.id || null,
+  });
+  await UsageLog.create({
+    assistantId: widget.assistantId,
+    widgetId: widget.id,
+    eventType: "text_message",
+  });
+  res.set("Access-Control-Allow-Origin", origin);
+  res.set("Cache-Control", "no-store");
+  res.json({ message: reply, providerResponseId: providerResponse.id || null });
+});
+
+app.post("/api/public/widgets/:widgetId/voice/session", async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const widget = await Widget.findOne({
+    where: { publicId: req.params.widgetId, active: true, voiceEnabled: true },
+    include: [
+      { model: Assistant, as: "assistant", where: { active: true } },
+      { model: WidgetDomain, as: "domains" },
+    ],
+  });
+  if (!widget) return res.status(404).json({ message: "Voice chat unavailable." });
+  const origin = publicOrigin(req);
+  if (!isOriginAuthorized(origin, widget.domains || [])) {
+    return res.status(403).json({ message: "This widget is not authorized for this website." });
+  }
+  const voiceSession = await findPublicSession(req);
+  if (!voiceSession) return res.status(401).json({ message: "A valid widget session is required." });
+  if (!openaiClient) return res.status(503).json({ message: "OpenAI is not configured on the server." });
+  try {
+    const assistant = await Assistant.findByPk(widget.assistantId, {
+      include: [{ model: AssistantConfiguration, as: "configuration" }],
+    });
+    const configuration = assistant?.configuration;
+    const intakeInstructions = configuration?.intakeEnabled !== false
+      ? " This assistant is also conducting a patient intake. Request consent before collecting health information, ask one question at a time, confirm the collected summary, and never provide a diagnosis or emergency advice."
+      : "";
+    const providerSession = await openaiClient.realtime.clientSecrets.create({
+      session: {
+        type: "realtime",
+        model: "gpt-realtime",
+        instructions: (configuration?.instructions || "You are a helpful AI assistant.") + intakeInstructions,
+        audio: { output: { voice: configuration?.voice || process.env.OPENAI_VOICE || "alloy" } },
+      },
+    });
+    await voiceSession.update({
+      providerSessionId: providerSession.id || null,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    });
+    await UsageLog.create({ assistantId: widget.assistantId, widgetId: widget.id, eventType: "voice_session" });
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Cache-Control", "no-store");
+    res.json({ clientSecret: providerSession.value, expiresAt: voiceSession.expiresAt });
+  } catch (error) {
+    await ApiLog.create({ provider: "openai", endpoint: "realtime.clientSecrets.create", statusCode: 502, latencyMs: 0, error: error.message });
+    res.status(502).json({ message: "Could not initialize the voice session." });
+  }
+});
+
+app.post("/api/public/widgets/:widgetId/voice/end", async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const voiceSession = await findPublicSession(req);
+  if (!voiceSession) return res.status(401).json({ message: "A valid widget session is required." });
+  await voiceSession.update({ status: "ended", endedAt: new Date() });
+  res.sendStatus(204);
+});
+
+app.get("/widget/loader.js", (_req, res) => {
+  res.type("application/javascript");
+  res.set("Cache-Control", "public, max-age=300");
+  res.sendFile(path.join(publicWidgetDir, "loader.js"));
+});
 
 const intakeSessions = new Map();
 const INTAKE_MAX_RETRIES = 2;

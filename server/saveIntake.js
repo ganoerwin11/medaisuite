@@ -7,10 +7,19 @@ import {
   phoneMatch,
   sequelize,
 } from "./db.js";
-import { QUESTIONNAIRE, classifyPriority } from "./questionnaire.js";
 import { buildSummary } from "./callFlow.js";
 
 const text = (session, code) => session.answers[code]?.text || "";
+
+function classifyPriority(answers) {
+  const severity = answers.B06?.value ?? 0;
+  const pain = answers.E02?.value ?? 0;
+  if (severity >= 8 || pain >= 8) return "Urgent";
+  if (answers.D04?.value === "yes" || answers.D05?.value === "yes" || answers.E05?.value === "Getting worse") {
+    return "Soon";
+  }
+  return "Routine";
+}
 
 const toClient = (q) => ({
   id: q.id,
@@ -61,24 +70,6 @@ export async function writeQuestions(items) {
     }
   });
   return readQuestions();
-}
-
-// Inserts the built-in questions into questionnaire_questions when missing.
-export async function seedQuestions() {
-  for (const [index, q] of QUESTIONNAIRE.entries()) {
-    await Question.findOrCreate({
-      where: { code: q.code },
-      defaults: {
-        section: q.section,
-        prompt: q.prompt,
-        type: q.type,
-        required: q.required,
-        options: q.options || null,
-        showIf: q.showIf || null,
-        sortOrder: index + 1,
-      },
-    });
-  }
 }
 
 async function findOrCreatePatient(session, transaction) {
@@ -145,7 +136,8 @@ export function saveLiveIntake(callId, session, confirmed, source = "ai_call") {
 export async function saveQuestionnaire(session) {
   if (!session.dataConsent) return null;
 
-  const answered = QUESTIONNAIRE.filter((q) => session.answers[q.code]);
+  const questions = await readQuestions();
+  const answered = questions.filter((q) => session.answers[q.code]);
   if (answered.length === 0) return null;
 
   const summary = buildSummary(session);

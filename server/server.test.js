@@ -191,3 +191,26 @@ test("user management endpoints require an admin session and a connected databas
     assert.equal(response.status, 503);
   });
 });
+
+test("assistant and widget endpoints are database-aware and remain protected", async () => {
+  await withServer(async (port) => {
+    const token = await login(port);
+    for (const path of ["/api/assistants", "/api/widgets"]) {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(response.status, 503);
+    }
+  });
+});
+
+test("standalone loader is served without exposing server secrets", async () => {
+  await withServer(async (port) => {
+    const response = await fetch(`http://127.0.0.1:${port}/widget/loader.js`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") || "", /javascript/);
+    const source = await response.text();
+    assert.match(source, /attachShadow/);
+    assert.doesNotMatch(source, /OPENAI_API_KEY/);
+  });
+});

@@ -1,4 +1,5 @@
 import { DataTypes, Op, Sequelize } from "sequelize";
+import { randomUUID } from "node:crypto";
 
 const DB_NAME = process.env.DB_NAME || "medai_suite";
 const dbOptions = {
@@ -240,6 +241,141 @@ export const Appointment = sequelize.define(
   { tableName: "appointments" },
 );
 
+export const Assistant = sequelize.define(
+  "Assistant",
+  {
+    publicId: { type: DataTypes.STRING(64), allowNull: false, unique: true, defaultValue: () => `as_${randomUUID().replaceAll("-", "")}` },
+    name: { type: DataTypes.STRING(120), allowNull: false },
+    description: { type: DataTypes.TEXT, allowNull: false, defaultValue: "" },
+    active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+  },
+  { tableName: "assistants" },
+);
+
+export const AssistantConfiguration = sequelize.define(
+  "AssistantConfiguration",
+  {
+    instructions: { type: DataTypes.TEXT, allowNull: false, defaultValue: "" },
+    welcomeMessage: { type: DataTypes.TEXT, allowNull: false, defaultValue: "" },
+    model: { type: DataTypes.STRING(80), allowNull: false, defaultValue: "gpt-4o-mini" },
+    voice: { type: DataTypes.STRING(40), allowNull: false, defaultValue: "alloy" },
+    language: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "en" },
+    temperature: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0.7 },
+    maxTokens: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1000 },
+    knowledgeBase: { type: DataTypes.TEXT, allowNull: false, defaultValue: "" },
+    tools: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
+    conversationLimit: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 50 },
+    usageLimit: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1000 },
+    intakeEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+  },
+  { tableName: "assistant_configurations" },
+);
+
+export const Widget = sequelize.define(
+  "Widget",
+  {
+    publicId: { type: DataTypes.STRING(64), allowNull: false, unique: true },
+    name: { type: DataTypes.STRING(120), allowNull: false },
+    title: { type: DataTypes.STRING(160), allowNull: false },
+    welcomeMessage: { type: DataTypes.TEXT, allowNull: false, defaultValue: "" },
+    primaryColor: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "#7c3aed" },
+    secondaryColor: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "#f5f3ff" },
+    buttonColor: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "#7c3aed" },
+    position: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "bottom-right" },
+    size: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "medium" },
+    avatarUrl: { type: DataTypes.TEXT, allowNull: true },
+    fontStyle: { type: DataTypes.STRING(80), allowNull: false, defaultValue: "Inter, sans-serif" },
+    initialOpen: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    voiceEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+    textEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+    mobileBehavior: { type: DataTypes.STRING(30), allowNull: false, defaultValue: "responsive" },
+    active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+  },
+  { tableName: "widgets" },
+);
+
+export const WidgetDomain = sequelize.define(
+  "WidgetDomain",
+  {
+    domain: { type: DataTypes.STRING(253), allowNull: false },
+    active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+  },
+  { tableName: "widget_domains" },
+);
+
+export const Conversation = sequelize.define(
+  "Conversation",
+  {
+    publicSessionId: { type: DataTypes.STRING(64), allowNull: false, unique: true },
+    kind: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "text" },
+    status: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "active" },
+    originDomain: { type: DataTypes.STRING(253), allowNull: true },
+    startedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
+    endedAt: { type: DataTypes.DATE, allowNull: true },
+    intakeState: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
+  },
+  { tableName: "conversations" },
+);
+
+export const Message = sequelize.define(
+  "Message",
+  {
+    idempotencyKey: { type: DataTypes.STRING(128), allowNull: true, unique: true },
+    role: { type: DataTypes.STRING(20), allowNull: false },
+    content: { type: DataTypes.TEXT, allowNull: false },
+    status: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "completed" },
+    providerResponseId: { type: DataTypes.STRING(128), allowNull: true },
+  },
+  { tableName: "messages" },
+);
+
+export const VoiceSession = sequelize.define(
+  "VoiceSession",
+  {
+    sessionToken: { type: DataTypes.STRING(128), allowNull: false, unique: true },
+    status: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "active" },
+    expiresAt: { type: DataTypes.DATE, allowNull: false },
+    providerSessionId: { type: DataTypes.STRING(128), allowNull: true },
+    endedAt: { type: DataTypes.DATE, allowNull: true },
+  },
+  { tableName: "voice_sessions" },
+);
+
+export const UsageLog = sequelize.define(
+  "UsageLog",
+  {
+    eventType: { type: DataTypes.STRING(40), allowNull: false },
+    quantity: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
+    estimatedCostUsd: { type: DataTypes.DECIMAL(12, 6), allowNull: true },
+    metadata: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
+  },
+  { tableName: "usage_logs" },
+);
+
+export const ApiLog = sequelize.define(
+  "ApiLog",
+  {
+    provider: { type: DataTypes.STRING(40), allowNull: false },
+    endpoint: { type: DataTypes.STRING(160), allowNull: false },
+    statusCode: { type: DataTypes.INTEGER, allowNull: true },
+    latencyMs: { type: DataTypes.INTEGER, allowNull: true },
+    error: { type: DataTypes.TEXT, allowNull: true },
+  },
+  { tableName: "api_logs" },
+);
+
+export const SecurityLog = sequelize.define(
+  "SecurityLog",
+  {
+    eventType: { type: DataTypes.STRING(80), allowNull: false },
+    severity: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "info" },
+    origin: { type: DataTypes.STRING(253), allowNull: true },
+    ipAddress: { type: DataTypes.STRING(80), allowNull: true },
+    details: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
+  },
+  { tableName: "security_logs" },
+);
+
 Patient.hasMany(IntakeRecord, { foreignKey: "patientId" });
 IntakeRecord.belongsTo(Patient, { foreignKey: "patientId" });
 IntakeRecord.hasMany(QuestionnaireAnswer, { foreignKey: "intakeId" });
@@ -253,6 +389,25 @@ Appointment.belongsTo(Provider, { foreignKey: "providerId" });
 AvailabilitySlot.hasOne(Appointment, { foreignKey: "slotId" });
 Appointment.belongsTo(AvailabilitySlot, { foreignKey: "slotId" });
 Call.belongsTo(Patient, { foreignKey: "patientId" });
+
+Assistant.hasOne(AssistantConfiguration, { foreignKey: "assistantId", as: "configuration", onDelete: "CASCADE" });
+AssistantConfiguration.belongsTo(Assistant, { foreignKey: "assistantId", as: "assistant" });
+Assistant.hasMany(Widget, { foreignKey: "assistantId", as: "widgets", onDelete: "CASCADE" });
+Widget.belongsTo(Assistant, { foreignKey: "assistantId", as: "assistant" });
+Widget.hasMany(WidgetDomain, { foreignKey: "widgetId", as: "domains", onDelete: "CASCADE" });
+WidgetDomain.belongsTo(Widget, { foreignKey: "widgetId", as: "widget" });
+Assistant.hasMany(Conversation, { foreignKey: "assistantId", as: "conversations", onDelete: "CASCADE" });
+Conversation.belongsTo(Assistant, { foreignKey: "assistantId", as: "assistant" });
+Widget.hasMany(Conversation, { foreignKey: "widgetId", as: "conversations", onDelete: "SET NULL" });
+Conversation.belongsTo(Widget, { foreignKey: "widgetId", as: "widget" });
+Conversation.hasMany(Message, { foreignKey: "conversationId", as: "messages", onDelete: "CASCADE" });
+Message.belongsTo(Conversation, { foreignKey: "conversationId", as: "conversation" });
+Conversation.hasMany(VoiceSession, { foreignKey: "conversationId", as: "voiceSessions", onDelete: "CASCADE" });
+VoiceSession.belongsTo(Conversation, { foreignKey: "conversationId", as: "conversation" });
+Assistant.hasMany(UsageLog, { foreignKey: "assistantId", as: "usageLogs", onDelete: "SET NULL" });
+UsageLog.belongsTo(Assistant, { foreignKey: "assistantId", as: "assistant" });
+Widget.hasMany(UsageLog, { foreignKey: "widgetId", as: "usageLogs", onDelete: "SET NULL" });
+UsageLog.belongsTo(Widget, { foreignKey: "widgetId", as: "widget" });
 
 async function ensureDatabaseExists() {
   const admin = new Sequelize("postgres", null, null, {

@@ -1,13 +1,50 @@
-import {
-  APPOINTMENT_SECTION,
-  QUESTIONNAIRE,
-  classifyPriority,
-  isVisible,
-  normalizeAnswer,
-  parseYesNo,
-} from "./questionnaire.js";
-
 export const MAX_RETRIES = 2;
+
+function parseYesNo(text) {
+  if (/\b(yes|yeah|yep|yup|sure|correct|absolutely|okay|ok)\b/i.test(text)) return "yes";
+  if (/\b(no|nope|nah|none|never|not)\b/i.test(text)) return "no";
+  return null;
+}
+
+function conditionMet(condition, answers) {
+  if (!condition) return true;
+  if (condition.anyOf) return condition.anyOf.some((item) => conditionMet(item, answers));
+  const answer = answers[condition.code];
+  if (condition.answered) return Boolean(answer);
+  if (!answer) return false;
+  return answer.value === condition.is;
+}
+
+function isVisible(question, answers) {
+  return conditionMet(question.showIf, answers);
+}
+
+function normalizeAnswer(question, speech) {
+  const text = String(speech || "").trim();
+  if (!text) return null;
+  if (question.type === "yesno") {
+    const value = parseYesNo(text);
+    return value ? { text, value } : null;
+  }
+  if (question.type === "scale") {
+    const match = text.match(/\b(10|[1-9])\b/);
+    return match ? { text, value: Number(match[1]) } : null;
+  }
+  if (question.type === "choice") {
+    const lower = text.toLowerCase();
+    const exact = (question.options || []).find((option) => lower.includes(String(option).toLowerCase()));
+    return exact ? { text, value: exact } : null;
+  }
+  return { text, value: null };
+}
+
+function classifyPriority(answers) {
+  const severity = answers.B06?.value ?? 0;
+  const pain = answers.E02?.value ?? 0;
+  if (severity >= 8 || pain >= 8) return "Urgent";
+  if (answers.D04?.value === "yes" || answers.D05?.value === "yes" || answers.E05?.value === "Getting worse") return "Soon";
+  return "Routine";
+}
 
 export const CLOSING_COMPLETE =
   "Thank you for contacting our clinic. Your information has been recorded and will be made available to our medical team for review. Our staff will follow up with you regarding your request. Have a good day!";
@@ -40,6 +77,7 @@ export function createCallSession({ callId, from, recordingEnabled, customQuesti
     pending: null,
     retries: 0,
     transcript: [],
+    questions: [],
   };
 }
 
@@ -49,10 +87,10 @@ export function wantsAppointment(session) {
 
 // Decides what to ask next, following the spec's branching rules.
 export function nextStep(session) {
-  for (const question of QUESTIONNAIRE) {
+  for (const question of session.questions || []) {
     if (session.answers[question.code] || session.skipped.includes(question.code)) continue;
     if (!isVisible(question, session.answers)) continue;
-    if (question.section !== APPOINTMENT_SECTION && wantsAppointment(session) && !session.appointmentDone) {
+    if (question.section !== "Appointment Information" && wantsAppointment(session) && !session.appointmentDone) {
       return { kind: "slotOffer" };
     }
     return { kind: "question", question };

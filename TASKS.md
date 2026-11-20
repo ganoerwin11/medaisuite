@@ -2,6 +2,95 @@
 
 See [DEVELOPMENT_PLAN.md](./DEVELOPMENT_PLAN.md) for context and architecture notes.
 
+## Phase 9 — OpenAI Voice Chat and Embeddable Widget Platform
+
+### 9A — Inspection and planning
+
+- [x] Inspect repository structure and existing conventions
+- [x] Identify React/Vite, Express, Sequelize/PostgreSQL, auth, OpenAI, and Twilio foundations
+- [x] Create and update implementation plan
+- [ ] Review the existing database and route surface before model additions
+
+### 9B — Foundation and database
+
+- [x] Add `Assistant` and `AssistantConfiguration` models and associations
+- [x] Add `Widget` and `WidgetDomain` models
+- [x] Add `Conversation`, `Message`, and `VoiceSession` models
+- [x] Add `UsageLog`, `ApiLog`, and `SecurityLog` models
+- [x] Add foreign keys, unique constraints, indexes, timestamps, and demo fallbacks
+- [ ] Replace or supplement `sequelize.sync()` with a migration workflow
+- [ ] Add model/domain/authorization tests
+
+### 9C — Assistant management
+
+- [x] Add admin assistant list/create/view/update/delete endpoints
+- [x] Add duplicate operation
+- [ ] Add activate/deactivate operations
+- [x] Add initial assistant dashboard management UI
+- [ ] Validate instructions, model, voice, language, behavior, tools, and limits
+
+### 9D — OpenAI text chat
+
+- [x] Add a server-side OpenAI Responses API service
+- [ ] Add dashboard text chat endpoint and UI
+- [x] Add public widget text chat endpoint
+- [x] Persist conversations and messages with duplicate-processing protection
+- [x] Add provider/network/status/error handling
+- [x] Add consent-aware intake mode using the existing A-G questionnaire engine
+- [x] Persist confirmed widget intake records through `saveQuestionnaire`
+
+### 9E — OpenAI realtime voice chat
+
+- [x] Add backend-mediated ephemeral Realtime API credential initialization
+- [ ] Add credential refresh endpoints
+- [x] Add voice-session end endpoint
+- [x] Persist voice session lifecycle and usage
+- [ ] Add microphone, transcript, status, mute, interrupt, and reconnection UI
+- [ ] Verify browser permission and network error handling
+
+### 9F — Widget builder
+
+- [x] Add widget CRUD and public-ID operations
+- [x] Add authorized domain allowlist management
+- [ ] Add live preview and appearance/behavior controls
+- [x] Generate async embed snippets
+- [x] Add immediate disable
+- [x] Add identifier revoke/regenerate operations
+
+### 9G — Standalone widget
+
+- [ ] Add a separate optimized production bundle build
+- [x] Serve an async `loader.js`
+- [x] Use Shadow DOM isolation
+- [x] Implement text chat
+- [ ] Implement browser voice UI
+- [ ] Test on standalone HTML and a separate host page
+
+### 9H — Public security and abuse controls
+
+- [ ] Add exact/subdomain domain validation
+- [ ] Add short-lived public widget/session tokens
+- [ ] Add public API rate limiting and per-assistant/widget limits
+- [ ] Record API, usage, and security events
+- [ ] Validate Origin/Referer only as supplemental host evidence
+
+### 9I — Conversations and analytics
+
+- [ ] Add conversation list/detail/search/filter/delete/export endpoints
+- [ ] Add dashboard conversation management UI
+- [ ] Add analytics overview and date/assistant/widget/domain filters
+- [ ] Track voice/text counts, duration, usage, failures, and domains
+- [ ] Enforce transcript retention and consent/privacy settings
+
+### 9J — Testing and deployment
+
+- [ ] Add authentication and assistant/widget API integration tests
+- [ ] Add domain authorization and public-session tests
+- [ ] Add text and voice session unit tests
+- [ ] Run frontend/build tests and standalone embed checks
+- [ ] Document environment, deployment, OpenAI credentials, and privacy controls
+- [ ] Do not claim real voice/embed success until browser and credential tests pass
+
 ## Phase 1 — Foundation: Authentication & User Management
 
 - [x] Inspect existing project structure and conventions
